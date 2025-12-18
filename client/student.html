@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Client</title>
+    <script src="https://unpkg.com/colyseus.js@^0.15.0/dist/colyseus.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        input {
+            padding: 8px;
+            margin: 5px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        #questionDisplay {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            min-height: 50px;
+        }
+        #timerDisplay {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        #answerInput {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Student Client</h1>
+    
+    <div>
+        <button id="joinBtn">JOIN as student</button>
+        <div id="status">Not connected</div>
+    </div>
+
+    <div id="gameArea" style="display: none; margin-top: 20px;">
+        <div id="questionDisplay">Waiting for question...</div>
+        <div id="timerDisplay">--</div>
+        
+        <input type="text" id="answerInput" placeholder="Enter your answer">
+        <button id="submitBtn">SUBMIT</button>
+    </div>
+
+    <script>
+        let room = null;
+        let timeRemaining = 0;
+        const joinBtn = document.getElementById("joinBtn");
+        const submitBtn = document.getElementById("submitBtn");
+        const statusDiv = document.getElementById("status");
+        const gameArea = document.getElementById("gameArea");
+        const questionDisplay = document.getElementById("questionDisplay");
+        const timerDisplay = document.getElementById("timerDisplay");
+        const answerInput = document.getElementById("answerInput");
+
+        joinBtn.addEventListener("click", async () => {
+            try {
+                const client = new Colyseus.Client("ws://localhost:3000");
+                room = await client.joinOrCreate("quiz_room", { role: "student" });
+                
+                statusDiv.textContent = "Connected as student";
+                joinBtn.disabled = true;
+                gameArea.style.display = "block";
+
+                room.onMessage("ROUND_STARTED", (message) => {
+                    console.log("Round started:", message);
+                    questionDisplay.textContent = message.question;
+                    timeRemaining = message.duration;
+                    updateTimerDisplay();
+                    answerInput.disabled = false;
+                    submitBtn.disabled = false;
+                });
+
+                room.onMessage("TIMER_UPDATE", (message) => {
+                    console.log("Timer update:", message);
+                    timeRemaining = message.timeRemaining;
+                    updateTimerDisplay();
+                });
+
+                room.onMessage("ROUND_ENDED", (message) => {
+                    console.log("Round ended:", message);
+                    questionDisplay.textContent = "Round ended. Waiting for next question...";
+                    timerDisplay.textContent = "Round Over";
+                    answerInput.disabled = true;
+                    submitBtn.disabled = true;
+                    answerInput.value = "";
+                });
+
+                room.onMessage("*", (type, message) => {
+                    console.log("Received message:", type, message);
+                });
+
+                room.onStateChange((state) => {
+                    console.log("State changed:", state);
+                    if (state.roundActive) {
+                        questionDisplay.textContent = state.questionText || "Question loading...";
+                        timeRemaining = state.timeRemaining;
+                        updateTimerDisplay();
+                    }
+                });
+
+                room.onLeave(() => {
+                    statusDiv.textContent = "Disconnected";
+                    joinBtn.disabled = false;
+                    gameArea.style.display = "none";
+                });
+
+            } catch (error) {
+                console.error("Failed to join room:", error);
+                statusDiv.textContent = "Error: " + error.message;
+            }
+        });
+
+        submitBtn.addEventListener("click", () => {
+            if (!room) {
+                alert("Please join the room first");
+                return;
+            }
+
+            const answer = answerInput.value.trim();
+            if (!answer) {
+                alert("Please enter an answer");
+                return;
+            }
+
+            room.send("submitAnswer", {
+                answer: answer
+            });
+
+            console.log("Sent submitAnswer:", answer);
+            answerInput.value = "";
+        });
+
+        function updateTimerDisplay() {
+            timerDisplay.textContent = `Time: ${timeRemaining}s`;
+            if (timeRemaining <= 10) {
+                timerDisplay.style.color = "red";
+            } else {
+                timerDisplay.style.color = "black";
+            }
+        }
+    </script>
+</body>
+</html>
+
