@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { joinQuizRoom, joinQuizRoomById } from "../ws/colyseusClient.js";
 import { removeToken, getToken } from "../utils/auth.js";
+import { useQuizRoomState } from "../quiz/useQuizRoomState.js";
 import { Timer } from "../components/Timer.jsx";
 import { QuestionDisplay } from "../components/QuestionDisplay.jsx";
 import { RoundControls } from "../components/RoundControls.jsx";
@@ -9,65 +9,75 @@ import { AnswerList } from "../components/AnswerList.jsx";
 
 export function Teacher() {
   const navigate = useNavigate();
-  const [room, setRoom] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState("connecting");
+  const token = getToken();
+  
+  // Use centralized state hook
+  const { state, room, connectionStatus } = useQuizRoomState({ role: "teacher", token });
+  
+  // Extract normalized state values
+  const roundState = state.round?.roundState || "ROUND_WAITING";
+  const roundActive = roundState === "ROUND_ACTIVE";
+  const questionText = state.round?.questionText || "";
+  const timeRemaining = state.round?.timeRemaining || 0;
+  const timerEnabled = state.round?.timerEnabled || false;
+  const roundNumber = state.round?.roundNumber || 0;
+  const teams = state.teams || {};
+  const matchScores = state.scoring?.matchScores || {};
+  const matchOver = state.scoring?.matchOver || false;
 
+  // Derive team gold from teams state
+  const teamGold = {};
+  for (const [teamId, teamData] of Object.entries(teams)) {
+    teamGold[teamId] = teamData.gold || 0;
+  }
+  
+  // Teacher-specific local state (not in normalized state)
   const [question, setQuestion] = useState("");
   const [duration, setDuration] = useState("60");
-
-  const [questionText, setQuestionText] = useState("");
-  const [timeRemaining, setTimeRemaining] = useState(0);
-  const [roundState, setRoundState] = useState("ROUND_WAITING"); // Chapter 8: Explicit round state
-  const [roundActive, setRoundActive] = useState(false); // Computed from roundState
-  const [timerEnabled, setTimerEnabled] = useState(false); // Chapter 8: Timer toggle
-  const [questionInput, setQuestionInput] = useState(""); // Chapter 8: Question input field
+  const [questionInput, setQuestionInput] = useState("");
   const [collectedAnswers, setCollectedAnswers] = useState([]);
-  const [teams, setTeams] = useState({});
-  const [teamGold, setTeamGold] = useState({});
   const [cardCastLog, setCardCastLog] = useState([]);
-  const [matchScores, setMatchScores] = useState({});
-  const [roundNumber, setRoundNumber] = useState(0);
-  const [matchOver, setMatchOver] = useState(false);
-  const [roundData, setRoundData] = useState(null); // ROUND_DATA message
-  const [pendingRound, setPendingRound] = useState(null); // Round waiting for scoring
-  const [scoreInputs, setScoreInputs] = useState({}); // { teamId: score }
+  const [roundData, setRoundData] = useState(null);
+  const [pendingRound, setPendingRound] = useState(null);
+  const [scoreInputs, setScoreInputs] = useState({});
   const [roundsToWin, setRoundsToWin] = useState(5);
-  const [maxRounds, setMaxRounds] = useState(null); // null = unlimited
+  const [maxRounds, setMaxRounds] = useState(null);
+  const [allCards, setAllCards] = useState([]);
+  const allCardsRef = useRef([]);
   
   // Use ref to ensure we always have the latest setter
   const setCollectedAnswersRef = useRef(setCollectedAnswers);
-  const setTeamsRef = useRef(setTeams);
   useEffect(() => {
     setCollectedAnswersRef.current = setCollectedAnswers;
-    setTeamsRef.current = setTeams;
-  }, []);
+    allCardsRef.current = allCards;
+  }, [allCards]);
 
-  // Chapter 9: Watch room state and store room ID when available
-  // Use localStorage so display can access it from different tabs
+  // Fetch cards for card cast log
   useEffect(() => {
-    if (room) {
-      const roomId = room.id || room.roomId;
-      if (roomId) {
-        const currentStored = localStorage.getItem("currentQuizRoomId");
-        if (currentStored !== roomId) {
-          localStorage.setItem("currentQuizRoomId", roomId);
-          sessionStorage.setItem("currentQuizRoomId", roomId); // Also store in sessionStorage
-          console.log("[Teacher] Stored room ID from room state:", roomId);
+    async function fetchCards() {
+      try {
+        const token = getToken();
+        if (!token) return;
+        const response = await fetch("http://localhost:3000/api/shop/cards", {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setAllCards(data.cards || []);
         }
-      } else {
-        // Room ID not available yet, try again after a delay
-        const timeout = setTimeout(() => {
-          const delayedRoomId = room.id || room.roomId;
-          if (delayedRoomId) {
-            localStorage.setItem("currentQuizRoomId", delayedRoomId);
-            sessionStorage.setItem("currentQuizRoomId", delayedRoomId); // Also store in sessionStorage
-            console.log("[Teacher] Stored room ID (delayed from useEffect):", delayedRoomId);
-          }
-        }, 1000);
-        return () => clearTimeout(timeout);
+      } catch (error) {
+        console.error("[Teacher] Failed to fetch cards for log:", error);
       }
     }
-  }, [room]);
+    fetchCards();
+  }, []);
+
+  // Sync questionInput with questionText from state
+  useEffect(() => {
+    if (questionText && questionText !== questionInput) {
+      setQuestionInput(questionText);
+    }
+  }, [questionText]);
 
   // Debug: Log when collectedAnswers changes
   useEffect(() => {
@@ -75,455 +85,134 @@ export function Teacher() {
     console.log("[Teacher] collectedAnswers.length:", collectedAnswers.length);
   }, [collectedAnswers]);
 
+  // Handle teacher-specific messages that aren't fully in normalized state
   useEffect(() => {
-    let isMounted = true;
-
-    async function connect() {
-      try {
-        // Check if coming from lobby (has quizRoomId in localStorage)
-        const quizRoomId = localStorage.getItem("quizRoomId");
-        let joinedRoom;
-        
-        if (quizRoomId) {
-          // Connect to specific QuizRoom from lobby
-          const token = getToken();
-          console.log("[Teacher] Connecting to QuizRoom from lobby:", quizRoomId);
-          joinedRoom = await joinQuizRoomById(quizRoomId, "teacher", token);
-          localStorage.removeItem("quizRoomId"); // Clear after use
-        } else {
-          // Normal join (backward compatibility)
-          joinedRoom = await joinQuizRoom("teacher");
-        }
-        
-        if (!isMounted) {
-          return;
-        }
-
-        // Chapter 9: Always store room ID in localStorage for display to use (shared across tabs)
-        // Try multiple ways to get room ID (Colyseus may expose it differently)
-        const roomId = joinedRoom?.id || joinedRoom?.roomId || (joinedRoom && Object.getOwnPropertyDescriptor(joinedRoom, 'id')?.value);
-        if (joinedRoom && roomId) {
-          localStorage.setItem("currentQuizRoomId", roomId);
-          sessionStorage.setItem("currentQuizRoomId", roomId); // Also store in sessionStorage
-          console.log("[Teacher] Stored room ID for display:", roomId);
-        } else {
-          console.warn("[Teacher] Joined room but room ID is undefined. Room object:", joinedRoom);
-          // Try to get room ID from room state or connection
-          if (joinedRoom) {
-            console.warn("[Teacher] Room properties:", Object.keys(joinedRoom));
-            // Store a placeholder and try to get it later
-            setTimeout(() => {
-              const delayedRoomId = joinedRoom.id || joinedRoom.roomId;
-              if (delayedRoomId) {
-                localStorage.setItem("currentQuizRoomId", delayedRoomId);
-                sessionStorage.setItem("currentQuizRoomId", delayedRoomId); // Also store in sessionStorage
-                console.log("[Teacher] Stored room ID (delayed):", delayedRoomId);
-              }
-            }, 1000);
-          }
-        }
-
-        setRoom(joinedRoom);
-        setConnectionStatus("connected");
-        
-        // Also store room ID after state is set (in case it wasn't available immediately)
-        if (joinedRoom) {
-          // Use a ref or effect to store room ID when it becomes available
-          const checkAndStoreRoomId = () => {
-            const currentRoomId = joinedRoom.id || joinedRoom.roomId;
-            if (currentRoomId && localStorage.getItem("currentQuizRoomId") !== currentRoomId) {
-              localStorage.setItem("currentQuizRoomId", currentRoomId);
-              sessionStorage.setItem("currentQuizRoomId", currentRoomId); // Also store in sessionStorage
-              console.log("[Teacher] Stored room ID (after state set):", currentRoomId);
-            }
-          };
-          // Check immediately and also after a short delay
-          checkAndStoreRoomId();
-          setTimeout(checkAndStoreRoomId, 500);
-        }
-
-        // Chapter 9: Register ROOM_ID handler to store room ID from server
-        // Use localStorage instead of sessionStorage so display can access it from different tabs
-        joinedRoom.onMessage("ROOM_ID", (message) => {
-          if (message && message.roomId) {
-            localStorage.setItem("currentQuizRoomId", message.roomId);
-            sessionStorage.setItem("currentQuizRoomId", message.roomId); // Also store in sessionStorage for same-tab access
-            console.log("[Teacher] Received room ID from server:", message.roomId);
-          }
+    if (!room) return;
+    
+    // ROUND_ENDED - handle collectedAnswers (teacher-specific)
+    room.onMessage("ROUND_ENDED", (message) => {
+      console.log("[Teacher] ROUND_ENDED handler called - full message:", message);
+      
+      // Handle team-based answers
+      if (message.teams && Array.isArray(message.teams)) {
+        const answersArray = [];
+        message.teams.forEach(team => {
+          const rawAnswer = typeof team.answer === "string" ? team.answer : "";
+          const displayAnswer = rawAnswer.trim().length > 0 ? rawAnswer : "(No answer submitted)";
+          answersArray.push({
+            clientId: team.teamId,
+            text: displayAnswer,
+            teamId: team.teamId,
+            writer: team.writerName || team.writer
+          });
         });
-
-        // Chapter 8: Register ROUND_STATE_UPDATE FIRST to catch initial state
-        joinedRoom.onMessage("ROUND_STATE_UPDATE", (message) => {
-          console.log("[Teacher] Round state update:", message);
-          if (message && message.state) {
-            // Always update state from server (server is source of truth)
-            setRoundState(message.state);
-            setRoundActive(message.state === "ROUND_ACTIVE");
-          } else {
-            // Default to ROUND_WAITING if not specified
-            setRoundState("ROUND_WAITING");
-            setRoundActive(false);
-          }
-          if (message && message.roundNumber !== undefined) {
-            setRoundNumber(message.roundNumber);
-          }
-        });
-
-        // Register TEAM_UPDATE handler early to catch initial teams
-        joinedRoom.onMessage("TEAM_UPDATE", (message) => {
-          console.log("[Teacher] Team update:", message);
-          if (message && message.teams) {
-            setTeamsRef.current(message.teams);
-          }
-        });
-
-        joinedRoom.onMessage("QUESTION_UPDATE", (message) => {
-          console.log("[Teacher] Question update:", message);
-          // Handle both empty string and undefined/null (empty string clears the question)
-          if (message.question !== undefined && message.question !== null) {
-            setQuestionText(message.question);
-            setQuestionInput(message.question); // Update input field
-          }
-        });
-
-        joinedRoom.onMessage("WRITER_ROTATED", (message) => {
-          console.log("[Teacher] Writer rotated:", message);
-          // Team display will update via TEAM_UPDATE
-        });
-
-        // Register ROUND_ENDED handler BEFORE catch-all to ensure it's processed
-        joinedRoom.onMessage("ROUND_ENDED", (message) => {
-          console.log("[Teacher] ROUND_ENDED handler called - full message:", message);
-          
-          // Handle team-based answers
-          if (message.teams) {
-            const teamsData = {};
-            const answersArray = [];
-            message.teams.forEach(team => {
-              teamsData[team.teamId] = team;
-              // Convert team answers to collectedAnswers format for display
-              if (team.answer) {
-                answersArray.push({
-                  clientId: team.teamId,
-                  text: team.answer,
-                  teamId: team.teamId,
-                  writer: team.writerName || team.writer
-                });
-              }
-            });
-            setTeamsRef.current(teamsData);
-            // Update collectedAnswers with team answers
-            setCollectedAnswersRef.current(answersArray);
-            console.log("[Teacher] Teams data:", teamsData);
-            console.log("[Teacher] Collected answers from teams:", answersArray);
-          }
-          
-          // Keep individual answers for backward compatibility (merge with team answers)
-          const legacyAnswers = message.answers || [];
-          if (legacyAnswers.length > 0) {
-            setCollectedAnswersRef.current(prev => {
-              const existing = prev || [];
-              // Merge, avoiding duplicates
-              const merged = [...existing];
-              legacyAnswers.forEach(legacy => {
-                if (!merged.find(a => a.clientId === legacy.clientId)) {
-                  merged.push(legacy);
-                }
-              });
-              return merged;
-            });
-          }
-          
-          setRoundActive(false);
-          setRoundState("ROUND_REVIEW"); // Chapter 8: Explicit state
-        });
-
-        joinedRoom.onMessage("*", (type, message) => {
-          console.log("[Teacher] * Message:", type, message);
-          // ROUND_ENDED is handled by specific handler above
-        });
-
-        joinedRoom.onMessage("LOCK", (message) => {
-          console.log("[Teacher] Team locked:", message);
-          // Teams state will be updated via TEAM_UPDATE
-        });
-
-        joinedRoom.onMessage("GOLD_UPDATE", (message) => {
-          console.log("[Teacher] Gold update:", message);
-          if (message.gold) {
-            setTeamGold(prev => ({ ...prev, ...message.gold }));
-          }
-        });
-
-        joinedRoom.onMessage("ROUND_STARTED", (message) => {
-          setQuestionText(message.question);
-          setTimeRemaining(message.duration);
-          setRoundActive(true);
-          setCollectedAnswers([]); // Clear previous answers when new round starts
-          // Immediately sync gold from room state (GOLD_UPDATE message should also arrive)
-          if (joinedRoom.state && joinedRoom.state.gold) {
-            const goldData = {};
-            joinedRoom.state.gold.forEach((gold, teamId) => {
-              goldData[teamId] = gold;
-            });
-            if (Object.keys(goldData).length > 0) {
-              setTeamGold(prev => ({ ...prev, ...goldData }));
-            }
-          }
-          // Don't clear cardCastLog - keep it across rounds
-        });
-
-        joinedRoom.onMessage("ROUND_DATA", (message) => {
-          console.log("[Teacher] Round data (answers for scoring):", message);
-          setRoundData(message);
-          setPendingRound(message.roundNumber);
-          
-          // Use ROUND_DATA.answers as the canonical source for collected answers
-          // This is more reliable than ROUND_ENDED.teams[].answer
-          if (message.answers) {
-            const answersArray = [];
-            Object.keys(message.answers).forEach(teamId => {
-              const answerData = message.answers[teamId];
-              const answerText = answerData.text || "";
-              answersArray.push({
-                clientId: teamId,
-                text: answerText.trim().length > 0 ? answerText : "(No answer submitted)",
-                teamId: teamId,
-                writer: answerData.writerId || teamId
-              });
-            });
-            setCollectedAnswersRef.current(answersArray);
-            console.log("[Teacher] Collected answers from ROUND_DATA:", answersArray);
-          }
-          
-          // Initialize score inputs
-          const inputs = {};
-          if (message.answers) {
-            Object.keys(message.answers).forEach(teamId => {
-              inputs[teamId] = "";
-            });
-          }
-          setScoreInputs(inputs);
-        });
-
-        joinedRoom.onMessage("ROUND_ENDED", (message) => {
-          console.log("[Teacher] ROUND_ENDED handler called - full message:", message);
-
-          // Handle team-based answers
-          if (message.teams && Array.isArray(message.teams)) {
-            const teamsData = {};
-            const answersArray = [];
-
-            message.teams.forEach(team => {
-              const rawAnswer = typeof team.answer === "string" ? team.answer : "";
-              const displayAnswer = rawAnswer.trim().length > 0 ? rawAnswer : "(No answer submitted)";
-
-              console.log(
-                `[Teacher] Processing team ${team.teamId}: ` +
-                `answer="${rawAnswer}", display="${displayAnswer}", ` +
-                `answer length=${rawAnswer.length}`
-              );
-
-              teamsData[team.teamId] = team;
-
-              // Always add an entry so teacher sees all teams, even if they left it blank
-              answersArray.push({
-                clientId: team.teamId,
-                text: displayAnswer,
-                teamId: team.teamId,
-                writer: team.writerName || team.writer
-              });
-            });
-
-            setTeamsRef.current(teamsData);
-            setCollectedAnswersRef.current(answersArray);
-
-            console.log("[Teacher] Teams data:", teamsData);
-            console.log("[Teacher] Collected answers from teams:", answersArray);
-            console.log("[Teacher] Collected answers count:", answersArray.length);
-          } else {
-            console.warn("[Teacher] ROUND_ENDED message.teams is missing or not an array:", message.teams);
-          }
-
-          // Keep individual answers for backward compatibility (merge with team answers)
-          const legacyAnswers = message.answers || [];
-          if (legacyAnswers.length > 0) {
-            setCollectedAnswersRef.current(prev => {
-              const existing = prev || [];
-              // Merge, avoiding duplicates
-              const merged = [...existing];
-              legacyAnswers.forEach(legacy => {
-                if (!merged.find(a => a.clientId === legacy.clientId)) {
-                  merged.push(legacy);
-                }
-              });
-              return merged;
-            });
-          }
-          
-          setRoundActive(false);
-        });
-
-        joinedRoom.onMessage("ROUND_SCORE", (message) => {
-          console.log("[Teacher] Round score:", message);
-          setRoundNumber(message.roundNumber || 0);
-          if (message.roundPoints?.teams) {
-            setMatchScores(message.roundPoints.teams);
-          }
-          if (message.matchOver) {
-            setMatchOver(true);
-          } else {
-            // If match is not over, update round state to ROUND_ENDED (to enable Next Round button)
-            setRoundState("ROUND_ENDED");
-            setRoundActive(false);
-            // Clear question text when round ends (if match not over)
-            setQuestionText("");
-            setQuestionInput("");
-          }
-          // Clear pending round after scores received
-          if (message.roundNumber === pendingRound) {
-            setPendingRound(null);
-            setRoundData(null);
-            setScoreInputs({});
-          }
-        });
-
-        joinedRoom.onMessage("MATCH_OVER", (message) => {
-          console.log("[Teacher] Match over:", message);
-          setMatchOver(true);
-          if (message.finalScores?.teams) {
-            setMatchScores(message.finalScores.teams);
-          }
-        });
-
-        joinedRoom.onMessage("MATCH_RESET", (message) => {
-          console.log("[Teacher] Match reset:", message);
-          setMatchOver(false);
-          setRoundNumber(0);
-          setMatchScores({});
-          setQuestionText("");
-          setQuestionInput("");
-          setRoundState("ROUND_WAITING");
-          setRoundActive(false);
-        });
-
-        joinedRoom.onMessage("MATCH_SETTINGS_UPDATE", (message) => {
-          console.log("[Teacher] Match settings update:", message);
-          if (message.roundsToWin !== undefined) {
-            setRoundsToWin(message.roundsToWin);
-          }
-          if (message.maxRounds !== undefined) {
-            setMaxRounds(message.maxRounds);
-          }
-        });
-
-        joinedRoom.onMessage("TEAM_SCORE_UPDATE", (message) => {
-          console.log("[Teacher] Team score update:", message);
-          setMatchScores(prev => ({
-            ...prev,
-            [message.teamId]: message.newRoundPoints
-          }));
-        });
-
-        joinedRoom.onMessage("ROUND_SCORE_UPDATE", (message) => {
-          console.log("[Teacher] Round score update:", message);
-          setMatchScores(message.updatedScores.teams);
-        });
-
-        joinedRoom.onMessage("TIMER_UPDATE", (message) => {
-          setTimeRemaining(message.timeRemaining);
-          if (message.enabled !== undefined) {
-            setTimerEnabled(message.enabled);
-          }
-        });
-
-        joinedRoom.onStateChange((state) => {
-          try {
-            console.log("[Teacher] State changed:", state);
-            if (state.questionText !== undefined) {
-              setQuestionText(state.questionText);
-            }
-            if (state.timeRemaining !== undefined) {
-              setTimeRemaining(state.timeRemaining);
-            }
-            // Chapter 8: Use explicit roundState
-            if (state.roundState !== undefined && state.roundState !== null) {
-              setRoundState(state.roundState);
-              setRoundActive(state.roundState === "ROUND_ACTIVE");
-            } else if (state.roundActive !== undefined) {
-              // Backward compatibility
-              setRoundActive(state.roundActive);
-              setRoundState(state.roundActive ? "ROUND_ACTIVE" : "ROUND_WAITING");
-            } else {
-              // If neither roundState nor roundActive exists, default to ROUND_WAITING
-              // This handles the case where state doesn't have these properties yet
-              setRoundState("ROUND_WAITING");
-              setRoundActive(false);
-            }
-            if (state.timerEnabled !== undefined) {
-              setTimerEnabled(state.timerEnabled);
-            }
-          } catch (error) {
-            console.error("[Teacher] Error in onStateChange:", error);
-          }
-          
-          // Sync team settings
-          // Team settings are now managed in the lobby
-          
-          // Sync teams from state
-          if (state.teams) {
-            const teamsData = {};
-            const goldData = {};
-            state.teams.forEach((team, teamId) => {
-              const teamName = team.name || teamId;
-              teamsData[teamId] = {
-                teamId: teamId,
-                name: teamName, // Include team name
-                writer: team.writer,
-                suggesters: Array.from(team.suggesters || []),
-                answer: team.answer,
-                locked: team.locked
-              };
-              // Sync gold from team state
-              if (team.gold !== undefined) {
-                goldData[teamId] = team.gold;
-              }
-            });
-            
-            setTeamsRef.current(teamsData);
-            if (Object.keys(goldData).length > 0) {
-              setTeamGold(prev => ({ ...prev, ...goldData }));
-            }
-          }
-
-          // Sync gold from state
-          if (state.gold && state.gold.has) {
-            const goldData = {};
-            state.gold.forEach((gold, teamId) => {
-              goldData[teamId] = gold;
-            });
-            if (Object.keys(goldData).length > 0) {
-              setTeamGold(prev => ({ ...prev, ...goldData }));
-            }
-          }
-        });
-      } catch (error) {
-        console.error("[Teacher] Failed to join room:", error);
-        if (isMounted) {
-          setConnectionStatus("error");
-        }
+        setCollectedAnswersRef.current(answersArray);
+        console.log("[Teacher] Collected answers from teams:", answersArray);
       }
-    }
-
-    connect();
-
-    return () => {
-      isMounted = false;
-      if (room) {
-        room.leave();
+      
+      // Keep individual answers for backward compatibility
+      const legacyAnswers = message.answers || [];
+      if (legacyAnswers.length > 0) {
+        setCollectedAnswersRef.current(prev => {
+          const existing = prev || [];
+          const merged = [...existing];
+          legacyAnswers.forEach(legacy => {
+            if (!merged.find(a => a.clientId === legacy.clientId)) {
+              merged.push(legacy);
+            }
+          });
+          return merged;
+        });
       }
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    });
+    
+    // ROUND_DATA - handle collectedAnswers and score inputs
+    room.onMessage("ROUND_DATA", (message) => {
+      console.log("[Teacher] Round data (answers for scoring):", message);
+      setRoundData(message);
+      setPendingRound(message.roundNumber);
+      
+      if (message.answers) {
+        const answersArray = [];
+        Object.keys(message.answers).forEach(teamId => {
+          const answerData = message.answers[teamId];
+          const answerText = answerData.text || "";
+          answersArray.push({
+            clientId: teamId,
+            text: answerText.trim().length > 0 ? answerText : "(No answer submitted)",
+            teamId: teamId,
+            writer: answerData.writerId || teamId
+          });
+        });
+        setCollectedAnswersRef.current(answersArray);
+        
+        // Initialize score inputs
+        const inputs = {};
+        Object.keys(message.answers).forEach(teamId => {
+          inputs[teamId] = "";
+        });
+        setScoreInputs(inputs);
+      }
+    });
+    
+    // ROUND_SCORE - handle pending round cleanup
+    room.onMessage("ROUND_SCORE", (message) => {
+      console.log("[Teacher] Round score:", message);
+      if (message.roundNumber === pendingRound) {
+        setPendingRound(null);
+        setRoundData(null);
+        setScoreInputs({});
+      }
+      if (!message.matchOver) {
+        // Clear question text when round ends (if match not over)
+        setQuestionInput("");
+      }
+    });
+    
+    // ROUND_STARTED - clear collected answers
+    room.onMessage("ROUND_STARTED", (message) => {
+      setCollectedAnswers([]);
+    });
+    
+    // CARD_CAST - handle card cast log (teacher-specific)
+    room.onMessage("CARD_CAST", (message) => {
+      console.log("[Teacher] Card cast:", message);
+      if (message.cardId && message.casterTeamId) {
+        const card = allCardsRef.current.find(c => c.id === message.cardId);
+        const cardName = card ? card.name : message.cardId;
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = {
+          cardId: message.cardId,
+          cardName: cardName,
+          casterTeamId: message.casterTeamId,
+          targetTeamId: message.targetTeamId || message.casterTeamId,
+          timestamp: timestamp,
+          isCosmetic: message.isCosmetic || false
+        };
+        setCardCastLog(prev => [...prev, logEntry]);
+      }
+    });
+    
+    // MATCH_SETTINGS_UPDATE - handle match settings
+    room.onMessage("MATCH_SETTINGS_UPDATE", (message) => {
+      console.log("[Teacher] Match settings update:", message);
+      if (message.roundsToWin !== undefined) {
+        setRoundsToWin(message.roundsToWin);
+      }
+      if (message.maxRounds !== undefined) {
+        setMaxRounds(message.maxRounds);
+      }
+    });
+    
+    // Register other handlers that don't change state but we want to log
+    room.onMessage("WRITER_ROTATED", (message) => {
+      console.log("[Teacher] Writer rotated:", message);
+    });
+    
+    room.onMessage("LOCK", (message) => {
+      console.log("[Teacher] Team locked:", message);
+    });
+  }, [room, pendingRound]);
 
   // Chapter 8: New round control handlers
   const handleSetQuestion = () => {
@@ -826,6 +515,33 @@ export function Teacher() {
             }}
           >
             Open Classroom Display
+          </Link>
+          <Link 
+            to="/teacher/cards"
+            style={{
+              padding: "0.5rem 1rem",
+              backgroundColor: "#9c27b0",
+              color: "white",
+              textDecoration: "none",
+              borderRadius: "4px",
+              fontSize: "0.9rem"
+            }}
+          >
+            🎴 Card Controls
+          </Link>
+          <Link 
+            to="/teacher/moderation"
+            state={{ teams }}
+            style={{
+              padding: "0.5rem 1rem",
+              backgroundColor: "#ff5722",
+              color: "white",
+              textDecoration: "none",
+              borderRadius: "4px",
+              fontSize: "0.9rem"
+            }}
+          >
+            🛡️ Moderation
           </Link>
           <Link 
             to="/teacher/scoreboard"
@@ -1230,7 +946,7 @@ export function Teacher() {
                   fontSize: "0.9rem"
                 }}
               >
-                <strong>{log.timestamp}</strong>: Team <strong>{log.casterTeamId}</strong> cast <strong>{log.cardId}</strong> on Team <strong>{log.targetTeamId}</strong>
+                <strong>{log.timestamp}</strong>: Team <strong>{log.casterTeamId}</strong> cast <strong>{log.cardName}</strong> {log.targetTeamId !== log.casterTeamId ? `on Team ${log.targetTeamId}` : ''} {log.isCosmetic ? '(cosmetic)' : ''}
               </div>
             ))}
           </div>

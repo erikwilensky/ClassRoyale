@@ -1,22 +1,22 @@
 {
-  "name": "class-royale-client",
-  "version": "0.0.0",
-  "private": true,
+  "name": "classroyale-client",
+  "version": "1.0.0",
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "colyseus.js": "^0.16.19",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "colyseus.js": "^0.16.19"
   },
   "devDependencies": {
-    "@vitejs/plugin-react-swc": "^3.7.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react-swc": "^3.7.1",
     "vite": "^5.4.0"
   }
 }
-
-

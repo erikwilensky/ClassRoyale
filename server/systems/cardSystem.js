@@ -4,6 +4,7 @@
 import { CARDS } from "../config/cards.js";
 import { getPlayerUnlockedCards } from "../services/xpService.js";
 import { EffectState } from "../schema/EffectState.js";
+import { canPerformAction } from "./moderationGate.js";
 
 // Effect duration (10 seconds)
 export const EFFECT_DURATION = 10000;
@@ -125,6 +126,23 @@ export class CardSystem {
             if (!team) {
                 console.log(`[CardSystem] castCard rejected: team not found for client. sessionId=${client.sessionId}, playerId=${client.metadata.playerId}`);
                 client.send("ERROR", { message: "You are not in a team" });
+                return;
+            }
+
+            // Chapter 13: Use centralized moderation gate
+            const canPerform = canPerformAction(this.room, {
+                playerId: client.metadata.playerId,
+                teamId: casterTeamId,
+                action: "castCard"
+            });
+            if (!canPerform.ok) {
+                return; // Silent failure
+            }
+
+            // Chapter 16: Verify card is in team's deck
+            if (!team.deckSlots || !Array.from(team.deckSlots).includes(cardId)) {
+                console.log(`[CardSystem] castCard rejected: card ${cardId} not in team deck`);
+                client.send("ERROR", { message: "Card not in team deck" });
                 return;
             }
 

@@ -8,7 +8,13 @@ export function WriterInput({
   onInsertSuggestion,
   onLockAnswer,
   disabled,
-  locked
+  locked,
+  // Chapter 17.2: Themeable className props
+  className = "",
+  textareaClassName = "clash-textarea",
+  actionsClassName = "",
+  buttonClassName = "clash-btn clash-btn--primary",
+  suggestionsClassName = "",
 }) {
   const handleInsert = (suggestion, index) => {
     if (onInsertSuggestion) {
@@ -16,12 +22,12 @@ export function WriterInput({
     }
   };
 
+  const isLockDisabled = disabled || locked || !teamAnswer || teamAnswer.trim().length === 0;
+
   return (
-    <div style={{ marginTop: "1rem" }}>
-      <h3 style={{ marginBottom: "0.5rem" }}>✍️ Writer Controls</h3>
-      
-      <div style={{ marginBottom: "1rem" }}>
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: "bold" }}>
+    <div className={className || "clash-field"}>
+      <div className="clash-field">
+        <label className="clash-label">
           Team Answer:
         </label>
         <textarea
@@ -29,16 +35,7 @@ export function WriterInput({
           onChange={(e) => onAnswerChange && onAnswerChange(e.target.value)}
           disabled={disabled || locked}
           placeholder="Edit the team answer here. You can type directly or insert suggestions from your team."
-          style={{
-            width: "100%",
-            minHeight: "120px",
-            padding: "0.75rem",
-            fontSize: "1rem",
-            border: "2px solid #2196f3",
-            borderRadius: "4px",
-            fontFamily: "inherit",
-            resize: "vertical"
-          }}
+          className={textareaClassName}
         />
       </div>
 
@@ -46,31 +43,19 @@ export function WriterInput({
         suggestions={suggestions}
         onInsert={handleInsert}
         disabled={disabled || locked}
+        className={suggestionsClassName}
       />
 
-      <div style={{ marginTop: "1rem" }}>
+      <div className={actionsClassName || ""} style={{ marginTop: "1rem" }}>
         <button
           onClick={onLockAnswer}
-          disabled={disabled || locked || !teamAnswer || teamAnswer.trim().length === 0}
-          style={{
-            padding: "0.75rem 2rem",
-            fontSize: "1rem",
-            backgroundColor: (disabled || locked || !teamAnswer || teamAnswer.trim().length === 0) 
-              ? "#ccc" 
-              : "#f44336",
-            color: "white",
-            border: "none",
-            borderRadius: "4px",
-            cursor: (disabled || locked || !teamAnswer || teamAnswer.trim().length === 0) 
-              ? "not-allowed" 
-              : "pointer",
-            fontWeight: "bold"
-          }}
+          disabled={isLockDisabled}
+          className={buttonClassName}
         >
           {locked ? "🔒 Answer Locked" : "🔒 Lock Answer"}
         </button>
         {locked && (
-          <div style={{ marginTop: "0.5rem", color: "#4caf50", fontWeight: "bold" }}>
+          <div className="clash-locked-message">
             Your team's answer has been locked and submitted!
           </div>
         )}
@@ -78,6 +63,7 @@ export function WriterInput({
     </div>
   );
 }
+
 
 
 

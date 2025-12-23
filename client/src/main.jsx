@@ -5,6 +5,7 @@ import { Teacher } from "./pages/Teacher.jsx";
 import { TeacherScoreboard } from "./pages/TeacherScoreboard.jsx";
 import { TeacherLobby } from "./pages/TeacherLobby.jsx";
 import { TeacherCards } from "./pages/TeacherCards.jsx";
+import { TeacherModeration } from "./pages/TeacherModeration.jsx";
 import { Student } from "./pages/Student.jsx";
 import { Lobby } from "./pages/Lobby.jsx";
 import { Display } from "./pages/Display.jsx";
@@ -38,7 +39,8 @@ function ProtectedRoute({ children, requireAuth = true, requireTeacher = false }
   
   // If route requires teacher, check role
   if (requireTeacher && !getIsTeacher()) {
-    return <Navigate to="/student" replace />;
+    // Non-teachers trying to access teacher routes go to their lobby
+    return <Navigate to="/lobby" replace />;
   }
   
   // If route requires student (not teacher), redirect teachers away
@@ -95,6 +97,14 @@ function App() {
           element={
             <ProtectedRoute requireTeacher={true}>
               <TeacherScoreboard />
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/teacher/moderation" 
+          element={
+            <ProtectedRoute requireTeacher={true}>
+              <TeacherModeration />
             </ProtectedRoute>
           } 
         />

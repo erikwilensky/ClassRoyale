@@ -1,89 +1,211 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { joinQuizRoom, joinQuizRoomById, castCard } from "../ws/colyseusClient.js";
+import { castCard } from "../ws/colyseusClient.js";
 import { getToken, isAuthenticated, removeToken } from "../utils/auth.js";
-import { Timer } from "../components/Timer.jsx";
-import { QuestionDisplay } from "../components/QuestionDisplay.jsx";
-import { TeamStatus } from "../components/TeamStatus.jsx";
-import { WriterInput } from "../components/WriterInput.jsx";
-import { SuggesterBox } from "../components/SuggesterBox.jsx";
-import { GoldDisplay } from "../components/GoldDisplay.jsx";
-import { CardBar } from "../components/CardBar.jsx";
+import { useQuizRoomState } from "../quiz/useQuizRoomState.js";
+import { deriveStudentCapabilities, deriveRoundViewModel } from "../quiz/viewModels.js";
 import { EffectsOverlay } from "../components/EffectsOverlay.jsx";
 import { XPBar } from "../components/XPBar.jsx";
 import { XPPopup } from "../components/XPPopup.jsx";
-import { Scoreboard } from "../components/Scoreboard.jsx";
 import { RoundResult } from "../components/RoundResult.jsx";
 import { MatchResult } from "../components/MatchResult.jsx";
+import { useCardDrag } from "../ui/drag/useCardDrag.js";
+import { getEffectiveGoldCost, getValidDropTargets, canStartDrag } from "../ui/drag/dragRules.js";
+import { StudentClashLayout } from "../ui/clash/StudentClashLayout.jsx";
 
 export function Student() {
   const navigate = useNavigate();
-  const [room, setRoom] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState("connecting");
-
-  const [questionText, setQuestionText] = useState("");
-  const [timeRemaining, setTimeRemaining] = useState(0);
-  const [roundState, setRoundState] = useState("ROUND_WAITING"); // Chapter 8: Explicit round state
-  const [roundActive, setRoundActive] = useState(false); // Computed from roundState
-  const [timerEnabled, setTimerEnabled] = useState(false); // Chapter 8: Timer toggle
-
-  // Team state
+  const token = getToken();
+  
+  // Use centralized state hook
+  const { state, room, connectionStatus } = useQuizRoomState({ role: "student", token });
+  
+  // Extract normalized state values
+  const roundState = state.round?.roundState || "ROUND_WAITING";
+  const roundActive = roundState === "ROUND_ACTIVE";
+  const questionText = state.round?.questionText || "";
+  const timeRemaining = state.round?.timeRemaining || 0;
+  const timerEnabled = state.round?.timerEnabled || false;
+  const moderationState = state.moderation || { mutedPlayers: [], frozenTeams: [], roundFrozen: false };
+  const matchScore = state.scoring?.matchScores || {};
+  const roundResult = state.scoring?.roundResult || null;
+  const matchResult = state.scoring?.matchResult || null;
+  const matchOver = state.scoring?.matchOver || false;
+  const disabledCards = new Set(state.cardRules?.disabledCards || []);
+  const goldCostModifiers = state.cardRules?.goldCostModifiers || {};
+  
+  // Student-specific local state (UI state, not normalized)
+  const [suggestionText, setSuggestionText] = useState("");
+  const [availableTeams, setAvailableTeams] = useState([]);
+  const [minTeamSize, setMinTeamSize] = useState(2);
+  const [maxTeamSize, setMaxTeamSize] = useState(4);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [unlockedCards, setUnlockedCards] = useState([]);
+  const [playerXP, setPlayerXP] = useState(0);
+  const [playerLevel, setPlayerLevel] = useState(1);
+  const [xpPopup, setXPPopup] = useState(null);
+  const [playerId, setPlayerId] = useState(null);
+  const [matchResultDismissed, setMatchResultDismissed] = useState(() => {
+    return sessionStorage.getItem('matchResultDismissed') === 'true';
+  });
+  const [roundData, setRoundData] = useState(null);
+  const [scoresPending, setScoresPending] = useState(false);
+  
+  // Team state - derived from normalized state by finding our team
   const [teamId, setTeamId] = useState(null);
-  const [teamName, setTeamName] = useState(null); // Display name for team
+  const [teamName, setTeamName] = useState(null);
   const [isWriter, setIsWriter] = useState(false);
   const [teamAnswer, setTeamAnswer] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [teamLocked, setTeamLocked] = useState(false);
   const [writer, setWriter] = useState(null);
   const [suggesters, setSuggesters] = useState([]);
-
-  // Suggester state
-  const [suggestionText, setSuggestionText] = useState("");
-
-  // Team assembly state
-  const [availableTeams, setAvailableTeams] = useState([]);
-  const [minTeamSize, setMinTeamSize] = useState(2);
-  const [maxTeamSize, setMaxTeamSize] = useState(4);
-  const [newTeamName, setNewTeamName] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
-
-  // Card system state
   const [teamGold, setTeamGold] = useState(0);
   const [activeEffects, setActiveEffects] = useState([]);
-  const [disabledCards, setDisabledCards] = useState(new Set());
-  const [goldCostModifiers, setGoldCostModifiers] = useState({});
-  // XP and unlock state
-  const [unlockedCards, setUnlockedCards] = useState([]);
-  const [playerXP, setPlayerXP] = useState(0);
-  const [playerLevel, setPlayerLevel] = useState(1);
-  const [xpPopup, setXPPopup] = useState(null);
-
-  // Scoring state
-  const [roundScore, setRoundScore] = useState(null);
-  const [matchScore, setMatchScore] = useState({});
-  const [matchOver, setMatchOver] = useState(false);
-  const [roundResult, setRoundResult] = useState(null);
-  const [matchResult, setMatchResult] = useState(null);
-  // Track if user dismissed match result (persist in sessionStorage to survive refreshes)
-  const [matchResultDismissed, setMatchResultDismissed] = useState(() => {
-    return sessionStorage.getItem('matchResultDismissed') === 'true';
-  });
-  const [roundData, setRoundData] = useState(null); // ROUND_DATA message
-  const [scoresPending, setScoresPending] = useState(false);
-
+  
   // Use refs for state setters to avoid closure issues
   const setTeamAnswerRef = useRef(setTeamAnswer);
   const setSuggestionsRef = useRef(setSuggestions);
   const isLockingRef = useRef(false);
-  const insertingRef = useRef(new Set()); // Track which suggestions are being inserted
+  const insertingRef = useRef(new Set());
   const isWriterRef = useRef(isWriter);
   const teamIdRef = useRef(teamId);
+  const teamDropRefs = useRef(new Map());
+  
   useEffect(() => {
     setTeamAnswerRef.current = setTeamAnswer;
     setSuggestionsRef.current = setSuggestions;
     isWriterRef.current = isWriter;
     teamIdRef.current = teamId;
   }, [isWriter, teamId]);
+
+  // Drag state (Chapter 14)
+  const {
+    isDragging,
+    dragCardId,
+    dragCardMeta,
+    pointerX,
+    pointerY,
+    validTargetTeamIds,
+    hoveredTargetTeamId,
+    selectedCardId,
+    beginDrag,
+    updatePointer,
+    endDrag,
+    cancelDrag,
+    selectCard,
+    clearSelection,
+    setHoveredTargetTeamId,
+    isTeamValidDropTarget,
+  } = useCardDrag();
+  
+  // Derive team info from normalized state by matching sessionId
+  useEffect(() => {
+    if (!room || !state.teams) return;
+    
+    const sessionId = room.sessionId;
+    for (const [tId, teamData] of Object.entries(state.teams)) {
+      const isOurTeam = teamData.writer === sessionId || 
+                       (Array.isArray(teamData.suggesters) && teamData.suggesters.includes(sessionId));
+      if (isOurTeam) {
+        setTeamId(tId);
+        setTeamName(teamData.name || tId);
+        const newIsWriter = teamData.writer === sessionId;
+        setIsWriter(newIsWriter);
+        isWriterRef.current = newIsWriter;
+        setWriter(teamData.writer || null);
+        const suggestersArray = Array.isArray(teamData.suggesters) ? teamData.suggesters : [];
+        setSuggesters(suggestersArray);
+        if (teamData.answer !== undefined) {
+          setTeamAnswer(teamData.answer || "");
+        }
+        setTeamLocked(teamData.locked || false);
+        setTeamGold(teamData.gold || 0);
+        // Sync suggestions for writers
+        if (newIsWriter && teamData.suggestions !== undefined) {
+          const teamSuggestions = Array.isArray(teamData.suggestions) 
+            ? teamData.suggestions.map(s => ({
+                text: s.text || "",
+                suggesterId: s.suggesterId || "",
+                timestamp: s.timestamp || Date.now()
+              }))
+            : [];
+          setSuggestions(teamSuggestions);
+        }
+        break;
+      }
+    }
+  }, [room, state.teams]);
+  
+  // Derive student capabilities
+  const capabilities = useMemo(() => {
+    if (!playerId || !teamId) {
+      return {
+        canWriteAnswer: false,
+        canLockAnswer: false,
+        canSuggest: false,
+        canInsertSuggestion: false,
+        canCastCards: false
+      };
+    }
+    return deriveStudentCapabilities(state, {
+      playerId,
+      teamId,
+      isWriter,
+      teamAnswer
+    });
+  }, [state, playerId, teamId, isWriter, teamAnswer]);
+
+  const allTeamIds = useMemo(() => Object.keys(state.teams || {}), [state.teams]);
+  const opponentTeamIds = useMemo(
+    () => (teamId ? allTeamIds.filter((id) => id !== teamId) : []),
+    [allTeamIds, teamId]
+  );
+
+  const registerDropRef = (teamIdForRef, el) => {
+    if (!el) return;
+    teamDropRefs.current.set(teamIdForRef, el);
+  };
+
+  const handleGlobalPointerMove = (event) => {
+    if (!isDragging) return;
+    updatePointer(event);
+
+    // Hit test to update hovered target
+    let newHovered = null;
+    for (const [tId, el] of teamDropRefs.current.entries()) {
+      const rect = el.getBoundingClientRect();
+      if (
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom
+      ) {
+        newHovered = tId;
+        break;
+      }
+    }
+    setHoveredTargetTeamId(newHovered);
+  };
+
+  const handleGlobalPointerUp = (event) => {
+    if (!isDragging) return;
+    updatePointer(event);
+    const result = endDrag();
+    if (result.didDrop && result.cardId && result.targetTeamId) {
+      handleCastCard(result.cardId, result.targetTeamId, { skipModerationCheck: false, fromDrag: true });
+    }
+  };
+
+  useEffect(() => {
+    window.addEventListener("pointermove", handleGlobalPointerMove);
+    window.addEventListener("pointerup", handleGlobalPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handleGlobalPointerMove);
+      window.removeEventListener("pointerup", handleGlobalPointerUp);
+    };
+  });
 
   useEffect(() => {
     // Check authentication
@@ -92,553 +214,265 @@ export function Student() {
       return;
     }
   }, [navigate]);
-
+  
+  // Load profile data (XP, level) on connect
   useEffect(() => {
-    let isMounted = true;
-
-    async function connect() {
-      // Check authentication again
-      if (!isAuthenticated()) {
-        navigate("/login");
-        return;
-      }
-
+    if (!room || !token) return;
+    
+    async function loadProfile() {
       try {
-        // Try to restore team from localStorage (if user was in a team before refresh)
-        const savedTeamId = localStorage.getItem("lastTeamId");
-        
-        // Reset all team-related state when connecting
-        setTeamId(null);
-        setIsWriter(false);
-        setTeamAnswer("");
-        setSuggestions([]);
-        setTeamLocked(false);
-        setWriter(null);
-        setSuggesters([]);
-        setAvailableTeams([]);
-        
-        // Reset scoring state when connecting (will be set by messages if needed)
-        setRoundResult(null);
-        // Don't clear matchResult/matchOver if match result was dismissed (user doesn't want to see it again)
-        // Check sessionStorage in case state was reset on refresh
-        const wasDismissed = sessionStorage.getItem('matchResultDismissed') === 'true';
-        if (!wasDismissed) {
-          setMatchResult(null);
-          setMatchOver(false);
+        const profileResponse = await fetch("http://localhost:3000/api/profile", {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (profileResponse.ok) {
+          const profile = await profileResponse.json();
+          setPlayerXP(profile.xp);
+          setPlayerLevel(profile.level);
+          if (profile.unlockedCards) {
+            setUnlockedCards(profile.unlockedCards);
+          }
+          if (profile.id) {
+            setPlayerId(profile.id);
+          }
         }
-        setRoundData(null);
-        setScoresPending(false);
-        
-        // Get token and join room
-        const token = getToken();
-        
-        // Check if coming from lobby (has quizRoomId in localStorage)
-        const quizRoomId = localStorage.getItem("quizRoomId");
-        let joinedRoom;
-        
-        if (quizRoomId) {
-          // Connect to specific QuizRoom from lobby
-          console.log("[Student] Connecting to QuizRoom from lobby:", quizRoomId);
-          joinedRoom = await joinQuizRoomById(quizRoomId, "student", token);
-          localStorage.removeItem("quizRoomId"); // Clear after use
-        } else {
-          // Normal join (backward compatibility)
-          joinedRoom = await joinQuizRoom("student", token);
-        }
-        
-        if (!isMounted) {
-          return;
-        }
-
-        setRoom(joinedRoom);
-        setConnectionStatus("connected");
-        
-        // Load profile data (XP, level) on connect
-        try {
-          const profileResponse = await fetch("http://localhost:3000/api/profile", {
-            headers: { "Authorization": `Bearer ${token}` }
-          });
-          if (profileResponse.ok) {
-            const profile = await profileResponse.json();
-            setPlayerXP(profile.xp);
-            setPlayerLevel(profile.level);
-            if (profile.unlockedCards) {
-              setUnlockedCards(profile.unlockedCards);
-            }
-          }
-        } catch (error) {
-          console.error("Failed to load profile:", error);
-        }
-
-        joinedRoom.onMessage("*", (type, message) => {
-          console.log("[Student] Message:", type, message);
-        });
-
-        joinedRoom.onMessage("TEAM_JOINED", (message) => {
-          console.log("[Student] Team joined:", message);
-          setTeamId(message.teamId);
-          // Set team name from message, fallback to teamId
-          const displayName = message.teamName || message.teamId;
-          setTeamName(displayName);
-          const newIsWriter = Boolean(message.isWriter);
-          setIsWriter(newIsWriter);
-          isWriterRef.current = newIsWriter;
-          setWriter(message.writer || null);
-          // Ensure suggesters is always an array
-          const suggestersArray = Array.isArray(message.suggesters) ? message.suggesters : [];
-          setSuggesters(suggestersArray);
-          if (message.currentAnswer) {
-            setTeamAnswer(message.currentAnswer);
-          }
-          setErrorMessage("");
-          console.log("[Student] Team joined - isWriter:", newIsWriter, "teamName:", displayName, "suggesters count:", suggestersArray.length);
-        });
-
-        joinedRoom.onMessage("TEAM_LEFT", (message) => {
-          console.log("[Student] Team left:", message);
-          setTeamId(null);
-          setIsWriter(false);
-          setWriter(null);
-          setSuggesters([]);
-          setTeamAnswer("");
-          setTeamLocked(false);
-          // Clear saved team ID
-          localStorage.removeItem("lastTeamId");
-        });
-
-        joinedRoom.onMessage("AVAILABLE_TEAMS", (message) => {
-          console.log("[Student] Available teams:", message);
-          setAvailableTeams(message.teams || []);
-        });
-
-        joinedRoom.onMessage("TEAM_SETTINGS_UPDATE", (message) => {
-          console.log("[Student] Team settings update:", message);
-          if (message.minTeamSize !== undefined) {
-            setMinTeamSize(message.minTeamSize);
-          }
-          if (message.maxTeamSize !== undefined) {
-            setMaxTeamSize(message.maxTeamSize);
-          }
-        });
-
-        joinedRoom.onMessage("ERROR", (message) => {
-          console.log("[Student] Error:", message);
-          setErrorMessage(message.message || "An error occurred");
-          setTimeout(() => setErrorMessage(""), 5000); // Clear after 5 seconds
-        });
-        
-        // Listen for XP earned messages
-        joinedRoom.onMessage("XP_EARNED", (message) => {
-          console.log("[Student] XP earned:", message);
-          setPlayerXP(message.newXP);
-          setPlayerLevel(message.newLevel);
-          
-          // Show XP popup
-          setXPPopup({
-            amount: message.amount,
-            id: Date.now()
-          });
-          
-          // Update unlocked cards if new ones were unlocked
-          if (message.unlockedCards && message.unlockedCards.length > 0) {
-            setUnlockedCards(prev => {
-              const updated = [...prev];
-              message.unlockedCards.forEach(cardId => {
-                if (!updated.includes(cardId)) {
-                  updated.push(cardId);
-                }
-              });
-              return updated;
-            });
-          }
-        });
-
-        joinedRoom.onMessage("WRITER_TRANSFERRED", (message) => {
-          console.log("[Student] Writer transferred:", message);
-          if (message.teamId === teamId) {
-            setWriter(message.newWriter);
-            // Check if current user is the new writer
-            const newIsWriter = message.newWriter === joinedRoom.sessionId;
-            setIsWriter(newIsWriter);
-            isWriterRef.current = newIsWriter; // Update ref immediately
-            // Update suggesters list - old writer becomes suggester, new writer removed from suggesters
-            setSuggesters(prev => {
-              const newList = [...prev];
-              // Remove new writer from suggesters (they're now the writer)
-              const newWriterIndex = newList.indexOf(message.newWriter);
-              if (newWriterIndex >= 0) {
-                newList.splice(newWriterIndex, 1);
-              }
-              // Add old writer to suggesters (if not already there)
-              if (!newList.includes(message.oldWriter)) {
-                newList.push(message.oldWriter);
-              }
-              return newList;
-            });
-          }
-        });
-
-        joinedRoom.onMessage("TEAM_UPDATE", (message) => {
-          console.log("[Student] Team update:", message);
-          if (message.teams) {
-            // Find our team by checking if we're the writer or a suggester
-            Object.keys(message.teams).forEach(tId => {
-              const team = message.teams[tId];
-              const isOurTeam = team.writer === joinedRoom.sessionId || 
-                               (Array.isArray(team.suggesters) && team.suggesters.includes(joinedRoom.sessionId));
-              if (isOurTeam) {
-                setTeamId(tId);
-                const newIsWriter = team.writer === joinedRoom.sessionId;
-                setIsWriter(newIsWriter);
-                isWriterRef.current = newIsWriter;
-                setWriter(team.writer || null);
-                const suggestersArray = Array.isArray(team.suggesters) ? team.suggesters : [];
-                setSuggesters(suggestersArray);
-                if (team.answer !== undefined) {
-                  setTeamAnswer(team.answer || "");
-                }
-                setTeamLocked(team.locked || false);
-                // Sync suggestions from TEAM_UPDATE for writers
-                if (newIsWriter && team.suggestions !== undefined) {
-                  const teamSuggestions = Array.isArray(team.suggestions) 
-                    ? team.suggestions.map(s => ({
-                        text: s.text || "",
-                        suggesterId: s.suggesterId || "",
-                        timestamp: s.timestamp || Date.now()
-                      }))
-                    : [];
-                  setSuggestionsRef.current(teamSuggestions);
-                  console.log("[Student] Writer suggestions synced from TEAM_UPDATE:", teamSuggestions.length);
-                }
-                console.log("[Student] Team updated - teamId:", tId, "isWriter:", newIsWriter, "suggesters:", suggestersArray.length);
-              }
-            });
-          }
-        });
-
-        joinedRoom.onMessage("SUGGESTION", (message) => {
-          console.log("[Student] Received suggestion:", message);
-          // Use ref to check current isWriter value (avoids stale closure)
-          if (isWriterRef.current) {
-            // Add to suggestions list
-            setSuggestionsRef.current(prev => {
-              const newSuggestions = [...(prev || [])];
-              newSuggestions.push({
-                text: message.text,
-                suggesterId: message.suggesterId,
-                timestamp: message.timestamp
-              });
-              return newSuggestions;
-            });
-          } else {
-            console.log("[Student] Received suggestion but not writer, current isWriter:", isWriterRef.current);
-          }
-        });
-
-        joinedRoom.onMessage("ANSWER_UPDATE", (message) => {
-          console.log("[Student] Answer update:", message);
-          // Use ref for current teamId to avoid stale closure
-          if (message.teamId === teamIdRef.current) {
-            setTeamAnswerRef.current(message.answer || "");
-            // Clear inserting ref - the insert was successful
-            insertingRef.current.clear();
-          }
-        });
-
-        joinedRoom.onMessage("LOCK", (message) => {
-          console.log("[Student] Lock update:", message);
-          // Use ref for current teamId to avoid stale closure
-          if (message.teamId === teamIdRef.current) {
-            setTeamLocked(true);
-          }
-        });
-
-        // Chapter 8: New message handlers
-        joinedRoom.onMessage("ROUND_STATE_UPDATE", (message) => {
-          console.log("[Student] Round state update:", message);
-          if (message.state) {
-            setRoundState(message.state);
-            setRoundActive(message.state === "ROUND_ACTIVE");
-            if (message.state === "ROUND_ACTIVE") {
-              setTeamLocked(false);
-              isLockingRef.current = false;
-            }
-          }
-        });
-
-        joinedRoom.onMessage("QUESTION_UPDATE", (message) => {
-          console.log("[Student] Question update:", message);
-          // Store question but don't show until ROUND_ACTIVE
-          if (message.question) {
-            // Only update if in ACTIVE state, otherwise store for later
-            if (roundState === "ROUND_ACTIVE") {
-              setQuestionText(message.question);
-            }
-          }
-        });
-
-        joinedRoom.onMessage("WRITER_ROTATED", (message) => {
-          console.log("[Student] Writer rotated:", message);
-          if (message.teamId === teamId) {
-            // Check if current player is now the writer
-            // This will be confirmed via TEAM_UPDATE
-          }
-        });
-
-        joinedRoom.onMessage("ROUND_STARTED", (message) => {
-          console.log("[Student] Round started:", message);
-          setQuestionText(message.question);
-          setTimeRemaining(message.duration);
-          setRoundState("ROUND_ACTIVE");
-          setRoundActive(true);
-          setTeamLocked(false);
-          setSuggestions([]);
-          setSuggestionText("");
-          setActiveEffects([]); // Clear effects on new round
-          isLockingRef.current = false; // Reset lock flag for new round
-          setRoundResult(null); // Clear previous round result
-          setRoundData(null); // Clear round data
-          setScoresPending(false); // Clear pending state
-        });
-
-        joinedRoom.onMessage("TIMER_UPDATE", (message) => {
-          console.log("[Student] Timer update:", message);
-          setTimeRemaining(message.timeRemaining);
-          if (message.enabled !== undefined) {
-            setTimerEnabled(message.enabled);
-          }
-        });
-
-        joinedRoom.onMessage("ROUND_ENDED", (message) => {
-          console.log("[Student] Round ended:", message);
-          setRoundState("ROUND_REVIEW");
-          setRoundActive(false);
-          setTeamLocked(true);
-          setActiveEffects([]); // Clear effects on round end
-        });
-
-        joinedRoom.onMessage("ROUND_DATA", (message) => {
-          console.log("[Student] Round data (waiting for teacher to score):", message);
-          setRoundData(message);
-          setScoresPending(true);
-          // Clear previous round result
-          setRoundResult(null);
-        });
-
-        joinedRoom.onMessage("ROUND_SCORE", (message) => {
-          // #region agent log
-          console.log("[Student] ROUND_SCORE received:", message);
-          fetch('http://127.0.0.1:7243/ingest/30c23a0c-c564-4f36-b729-3b41b956410e',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Student.jsx:418',message:'ROUND_SCORE received',data:{hasMessage:!!message,matchOver:message?.matchOver,roundNumber:message?.roundNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-          // #endregion
-          
-          console.log("[Student] Round score:", message);
-          
-          // If match is over, don't set roundResult (matchResult will be set by MATCH_OVER)
-          // This prevents showing "Round scored" when match has ended
-          if (message.matchOver) {
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/30c23a0c-c564-4f36-b729-3b41b956410e',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Student.jsx:428',message:'Match over in ROUND_SCORE, not setting roundResult',data:{matchOver:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-            // #endregion
-            setMatchOver(true);
-            // Don't set roundResult - wait for MATCH_OVER message which will set matchResult
-            setRoundResult(null);
-          } else {
-            setRoundResult(message);
-          }
-          
-          setScoresPending(false);
-          setRoundData(null);
-          // Update match scores
-          if (message.roundPoints?.teams) {
-            setMatchScore(message.roundPoints.teams);
-          }
-        });
-
-        joinedRoom.onMessage("MATCH_OVER", (message) => {
-          // #region agent log
-          console.log("[Student] MATCH_OVER received:", message);
-          fetch('http://127.0.0.1:7243/ingest/30c23a0c-c564-4f36-b729-3b41b956410e',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Student.jsx:447',message:'MATCH_OVER received',data:{hasMessage:!!message,winner:message?.winner,hasFinalScores:!!message?.finalScores},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-          // #endregion
-          
-          console.log("[Student] Match over:", message);
-          // Only set match result if not already set and not dismissed (prevents duplicate displays)
-          setMatchResult(prev => {
-            if (prev) {
-              console.log("[Student] Match result already set, ignoring duplicate MATCH_OVER");
-              return prev;
-            }
-            return message;
-          });
-          // Only set matchOver if match result hasn't been dismissed
-          // Check both state and sessionStorage (in case state was reset on refresh)
-          const wasDismissed = matchResultDismissed || sessionStorage.getItem('matchResultDismissed') === 'true';
-          if (!wasDismissed) {
-            setMatchOver(true);
-          }
-        });
-
-        joinedRoom.onMessage("TEAM_SCORE_UPDATE", (message) => {
-          console.log("[Student] Team score update:", message);
-          setMatchScore(prev => ({
-            ...prev,
-            [message.teamId]: message.newRoundPoints
-          }));
-        });
-
-        joinedRoom.onMessage("PLAYER_SCORE_UPDATE", (message) => {
-          console.log("[Student] Player score update:", message);
-          // Update round result if it exists
-          setRoundResult(prev => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              evaluationScores: {
-                ...prev.evaluationScores,
-                perPlayer: {
-                  ...prev.evaluationScores?.perPlayer,
-                  [message.playerId]: message.newEvaluationScore
-                }
-              }
-            };
-          });
-        });
-
-        joinedRoom.onMessage("ROUND_SCORE_UPDATE", (message) => {
-          console.log("[Student] Round score update:", message);
-          setRoundResult(prev => ({
-            ...prev,
-            roundWinner: message.newRoundWinner,
-            roundPoints: {
-              teams: message.updatedScores.teams
-            }
-          }));
-          setMatchScore(message.updatedScores.teams);
-        });
-
-        joinedRoom.onMessage("GOLD_UPDATE", (message) => {
-          console.log("[Student] Gold update:", message);
-          if (message.gold && teamIdRef.current && message.gold[teamIdRef.current] !== undefined) {
-            setTeamGold(message.gold[teamIdRef.current]);
-          }
-        });
-
-        joinedRoom.onMessage("CARD_CAST", (message) => {
-          console.log("[Student] Card cast:", message);
-          if (message.targetTeamId === teamIdRef.current) {
-            // This effect targets our team
-            const newEffect = {
-              cardId: message.cardId,
-              casterTeamId: message.casterTeamId,
-              targetTeamId: message.targetTeamId,
-              timestamp: Date.now()
-            };
-            setActiveEffects(prev => [...prev, newEffect]);
-          }
-        });
-
-        joinedRoom.onMessage("CARD_RULES_UPDATE", (message) => {
-          console.log("[Student] CARD_RULES_UPDATE:", message);
-          if (message.disabledCards) {
-            setDisabledCards(new Set(message.disabledCards));
-          }
-          if (message.goldCostModifiers) {
-            setGoldCostModifiers(message.goldCostModifiers);
-          }
-        });
-
-        joinedRoom.onStateChange((state) => {
-          console.log("[Student] State changed:", state);
-          // Chapter 8: Use explicit roundState
-          if (state.roundState !== undefined) {
-            setRoundState(state.roundState);
-            setRoundActive(state.roundState === "ROUND_ACTIVE");
-            if (state.roundState === "ROUND_ACTIVE" && state.questionText) {
-              setQuestionText(state.questionText);
-            }
-          } else if (state.roundActive !== undefined) {
-            // Backward compatibility
-            setRoundActive(state.roundActive);
-            setRoundState(state.roundActive ? "ROUND_ACTIVE" : "ROUND_WAITING");
-            if (state.roundActive) {
-              setQuestionText(state.questionText || "Question loading...");
-            }
-          }
-          setTimeRemaining(state.timeRemaining);
-          if (state.timerEnabled !== undefined) {
-            setTimerEnabled(state.timerEnabled);
-          }
-          
-          // Sync team state from room state - find our team
-          if (state.teams && state.teams.has) {
-            state.teams.forEach((team, tId) => {
-              const isOurTeam = team.writer === joinedRoom.sessionId || 
-                               (Array.isArray(team.suggesters) && team.suggesters.includes(joinedRoom.sessionId));
-              if (isOurTeam) {
-                setTeamId(tId);
-                const newIsWriter = team.writer === joinedRoom.sessionId;
-                setIsWriter(newIsWriter);
-                isWriterRef.current = newIsWriter;
-                setWriter(team.writer || null);
-                const suggestersArray = Array.isArray(team.suggesters) ? Array.from(team.suggesters) : [];
-                setSuggesters(suggestersArray);
-                setTeamAnswer(team.answer || "");
-                setTeamLocked(team.locked || false);
-                // Sync gold from team state
-                if (team.gold !== undefined) {
-                  setTeamGold(team.gold);
-                }
-                // Sync suggestions if writer
-                if (newIsWriter && team.suggestions) {
-                  const teamSuggestions = Array.from(team.suggestions).map(s => ({
-                    text: s.text || "",
-                    suggesterId: s.suggesterId || "",
-                    timestamp: s.timestamp || Date.now()
-                  }));
-                  setSuggestionsRef.current(teamSuggestions);
-                } else if (!newIsWriter) {
-                  setSuggestionsRef.current([]);
-                }
-              }
-            });
-          }
-
-          // Sync gold from state
-          if (state.gold && state.gold.has && teamIdRef.current) {
-            const goldValue = state.gold.get(teamIdRef.current);
-            if (goldValue !== undefined) {
-              setTeamGold(goldValue);
-            }
-          }
-        });
       } catch (error) {
-        console.error("[Student] Failed to join room:", error);
-        if (isMounted) {
-          setConnectionStatus("error");
-        }
+        console.error("Failed to load profile:", error);
       }
     }
-
-    connect();
-
-    return () => {
-      isMounted = false;
-      if (room) {
-        room.leave();
+    
+    loadProfile();
+  }, [room, token]);
+  
+  // Handle student-specific messages that aren't in normalized state
+  useEffect(() => {
+    if (!room) return;
+    
+    // TEAM_JOINED - handled via TEAM_UPDATE in normalized state, but keep for immediate UI update
+    room.onMessage("TEAM_JOINED", (message) => {
+      console.log("[Student] Team joined:", message);
+      setTeamId(message.teamId);
+      setTeamName(message.teamName || message.teamId);
+      const newIsWriter = Boolean(message.isWriter);
+      setIsWriter(newIsWriter);
+      isWriterRef.current = newIsWriter;
+      setWriter(message.writer || null);
+      const suggestersArray = Array.isArray(message.suggesters) ? message.suggesters : [];
+      setSuggesters(suggestersArray);
+      if (message.currentAnswer) {
+        setTeamAnswer(message.currentAnswer);
       }
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+      setErrorMessage("");
+      localStorage.setItem("lastTeamId", message.teamId);
+    });
+    
+    room.onMessage("TEAM_LEFT", (message) => {
+      console.log("[Student] Team left:", message);
+      setTeamId(null);
+      setIsWriter(false);
+      setWriter(null);
+      setSuggesters([]);
+      setTeamAnswer("");
+      setTeamLocked(false);
+      localStorage.removeItem("lastTeamId");
+    });
+    
+    room.onMessage("AVAILABLE_TEAMS", (message) => {
+      console.log("[Student] Available teams:", message);
+      setAvailableTeams(message.teams || []);
+    });
+    
+    room.onMessage("TEAM_SETTINGS_UPDATE", (message) => {
+      console.log("[Student] Team settings update:", message);
+      if (message.minTeamSize !== undefined) {
+        setMinTeamSize(message.minTeamSize);
+      }
+      if (message.maxTeamSize !== undefined) {
+        setMaxTeamSize(message.maxTeamSize);
+      }
+    });
+    
+    room.onMessage("ERROR", (message) => {
+      console.log("[Student] Error:", message);
+      setErrorMessage(message.message || "An error occurred");
+      setTimeout(() => setErrorMessage(""), 5000);
+    });
+    
+    room.onMessage("XP_EARNED", (message) => {
+      console.log("[Student] XP earned:", message);
+      setPlayerXP(message.newXP);
+      setPlayerLevel(message.newLevel);
+      setXPPopup({
+        amount: message.amount,
+        id: Date.now()
+      });
+      if (message.unlockedCards && message.unlockedCards.length > 0) {
+        setUnlockedCards(prev => {
+          const updated = [...prev];
+          message.unlockedCards.forEach(cardId => {
+            if (!updated.includes(cardId)) {
+              updated.push(cardId);
+            }
+          });
+          return updated;
+        });
+      }
+    });
+    
+    room.onMessage("WRITER_TRANSFERRED", (message) => {
+      console.log("[Student] Writer transferred:", message);
+      if (message.teamId === teamId) {
+        setWriter(message.newWriter);
+        const newIsWriter = message.newWriter === room.sessionId;
+        setIsWriter(newIsWriter);
+        isWriterRef.current = newIsWriter;
+        setSuggesters(prev => {
+          const newList = [...prev];
+          const newWriterIndex = newList.indexOf(message.newWriter);
+          if (newWriterIndex >= 0) {
+            newList.splice(newWriterIndex, 1);
+          }
+          if (!newList.includes(message.oldWriter)) {
+            newList.push(message.oldWriter);
+          }
+          return newList;
+        });
+      }
+    });
+    
+    room.onMessage("SUGGESTION", (message) => {
+      console.log("[Student] Received suggestion:", message);
+      if (isWriterRef.current) {
+        setSuggestionsRef.current(prev => {
+          const newSuggestions = [...(prev || [])];
+          newSuggestions.push({
+            text: message.text,
+            suggesterId: message.suggesterId,
+            timestamp: message.timestamp
+          });
+          return newSuggestions;
+        });
+      }
+    });
+    
+    room.onMessage("ANSWER_UPDATE", (message) => {
+      console.log("[Student] Answer update:", message);
+      if (message.teamId === teamIdRef.current) {
+        setTeamAnswerRef.current(message.answer || "");
+        insertingRef.current.clear();
+      }
+    });
+    
+    room.onMessage("LOCK", (message) => {
+      console.log("[Student] Lock update:", message);
+      if (message.teamId === teamIdRef.current) {
+        setTeamLocked(true);
+      }
+    });
+    
+    room.onMessage("ROUND_STARTED", (message) => {
+      console.log("[Student] Round started:", message);
+      setTeamLocked(false);
+      setSuggestions([]);
+      setSuggestionText("");
+      setActiveEffects([]);
+      isLockingRef.current = false;
+      setRoundData(null);
+      setScoresPending(false);
+    });
+    
+    room.onMessage("ROUND_ENDED", (message) => {
+      console.log("[Student] Round ended:", message);
+      setTeamLocked(true);
+      setActiveEffects([]);
+    });
+    
+    room.onMessage("ROUND_DATA", (message) => {
+      console.log("[Student] Round data:", message);
+      setRoundData(message);
+      setScoresPending(true);
+    });
+    
+    room.onMessage("ROUND_SCORE", (message) => {
+      console.log("[Student] Round score:", message);
+      if (message.matchOver) {
+        // Match over - handled by normalized state
+        setScoresPending(false);
+        setRoundData(null);
+      } else {
+        // Round scored but match continues
+        setScoresPending(false);
+        setRoundData(null);
+      }
+    });
+    
+    room.onMessage("MATCH_OVER", (message) => {
+      console.log("[Student] Match over:", message);
+      const wasDismissed = matchResultDismissed || sessionStorage.getItem('matchResultDismissed') === 'true';
+      if (!wasDismissed) {
+        // Match result will be set by normalized state
+      }
+    });
+    
+    room.onMessage("TEAM_SCORE_UPDATE", (message) => {
+      console.log("[Student] Team score update:", message);
+      // Match scores are handled by normalized state
+    });
+    
+    room.onMessage("PLAYER_SCORE_UPDATE", (message) => {
+      console.log("[Student] Player score update:", message);
+      // Round result updates are handled by normalized state
+    });
+    
+    room.onMessage("ROUND_SCORE_UPDATE", (message) => {
+      console.log("[Student] Round score update:", message);
+      // Match scores are handled by normalized state
+    });
+    
+    // CARD_CAST - filter for our team's effects
+    room.onMessage("CARD_CAST", (message) => {
+      console.log("[Student] Card cast:", message);
+      if (message.targetTeamId === teamIdRef.current) {
+        const newEffect = {
+          cardId: message.cardId,
+          casterTeamId: message.casterTeamId,
+          targetTeamId: message.targetTeamId,
+          timestamp: Date.now()
+        };
+        setActiveEffects(prev => [...prev, newEffect]);
+      }
+    });
+  }, [room, teamId, matchResultDismissed]);
+  
+  // Filter active effects for our team from normalized state
+  useEffect(() => {
+    if (!teamId) {
+      setActiveEffects([]);
+      return;
+    }
+    const ourEffects = (state.effects?.activeEffects || []).filter(
+      effect => effect.targetTeamId === teamId
+    );
+    setActiveEffects(ourEffects);
+  }, [state.effects?.activeEffects, teamId]);
 
   const handleAnswerChange = (newAnswer) => {
-    if (!room || !isWriter || teamLocked) {
+    // Use capabilities from view model
+    if (!capabilities.canWriteAnswer) {
+      return;
+    }
+    if (!room || teamLocked) {
       return;
     }
     setTeamAnswer(newAnswer);
-    // Keep server-side team.answer in sync so timeout can still collect it
     room.send("updateAnswer", { answer: newAnswer });
   };
 
   const handleInsertSuggestion = (suggestion, index) => {
-    if (!room || !isWriter || teamLocked) {
+    // Use capabilities from view model
+    if (!capabilities.canInsertSuggestion) {
+      return;
+    }
+    if (!room || teamLocked) {
       return;
     }
 
@@ -664,6 +498,13 @@ export function Student() {
   };
 
   const handleLockAnswer = () => {
+    // Chapter 12: Check moderation state
+    if (moderationState.roundFrozen) {
+      return; // Round is frozen
+    }
+    if (teamId && moderationState.frozenTeams.includes(teamId)) {
+      return; // Team is frozen
+    }
     if (!room || !isWriter || teamLocked || !teamAnswer || teamAnswer.trim().length === 0) {
       return;
     }
@@ -689,6 +530,16 @@ export function Student() {
   };
 
   const handleSubmitSuggestion = (text) => {
+    // Chapter 12: Check moderation state
+    if (moderationState.roundFrozen) {
+      return; // Round is frozen
+    }
+    if (playerId && moderationState.mutedPlayers.includes(playerId)) {
+      return; // Player is muted
+    }
+    if (teamId && moderationState.frozenTeams.includes(teamId)) {
+      return; // Team is frozen
+    }
     if (!room || isWriter || teamLocked) {
       return;
     }
@@ -749,8 +600,21 @@ export function Student() {
     console.log("[Student] Sent transferWriter:", newWriterId);
   };
 
-  const handleCastCard = (cardId, targetTeamId) => {
+  const handleCastCard = (cardId, targetTeamId, options = {}) => {
     console.log("[Student] handleCastCard called:", { cardId, targetTeamId, hasRoom: !!room, teamId, roundActive });
+    // Chapter 12: Check moderation state
+    if (!options.skipModerationCheck && moderationState.roundFrozen) {
+      console.warn("[Student] Cannot cast card: round is frozen");
+      return;
+    }
+    if (!options.skipModerationCheck && playerId && moderationState.mutedPlayers.includes(playerId)) {
+      console.warn("[Student] Cannot cast card: player is muted");
+      return;
+    }
+    if (!options.skipModerationCheck && teamId && moderationState.frozenTeams.includes(teamId)) {
+      console.warn("[Student] Cannot cast card: team is frozen");
+      return;
+    }
     if (!room) {
       console.warn("[Student] Cannot cast card: no room");
       return;
@@ -767,6 +631,97 @@ export function Student() {
     castCard(room, cardId, targetTeamId);
   };
 
+  const handleCardPointerDown = (card, event) => {
+    if (!teamId || !capabilities.canCastCards || !roundActive || matchOver) {
+      return;
+    }
+    const isOwned = unlockedCards.includes(card.id);
+    const isDisabled = disabledCards.has(card.id);
+    const effectiveCost = getEffectiveGoldCost({ card, goldCostModifiers });
+    const canDrag = canStartDrag({
+      card,
+      capabilities,
+      isOwned,
+      isDisabled,
+      effectiveGoldCost: effectiveCost,
+      teamGold,
+      roundState,
+      matchOver,
+    });
+    if (!canDrag) return;
+
+    const validTargets = getValidDropTargets({
+      card,
+      myTeamId: teamId,
+      teamIds: allTeamIds,
+    });
+    if (validTargets.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    beginDrag(
+      {
+        id: card.id,
+        name: card.name,
+        type: card.type,
+        displayCostText:
+          card.type === "cosmetic"
+            ? "Free"
+            : `${effectiveCost}💰`,
+      },
+      event,
+      validTargets
+    );
+  };
+
+  const handleCardClickForSelect = (card, event) => {
+    if (!teamId || !capabilities.canCastCards || !roundActive || matchOver) {
+      return;
+    }
+    const isOwned = unlockedCards.includes(card.id);
+    const isDisabled = disabledCards.has(card.id);
+    const effectiveCost = getEffectiveGoldCost({ card, goldCostModifiers });
+    const canUse = canStartDrag({
+      card,
+      capabilities,
+      isOwned,
+      isDisabled,
+      effectiveGoldCost: effectiveCost,
+      teamGold,
+      roundState,
+      matchOver,
+    });
+    if (!canUse) return;
+
+    // For self-target cards, treat click as immediate cast on own team.
+    if (card.target === "self") {
+      handleCastCard(card.id, teamId);
+      clearSelection();
+      return;
+    }
+
+    // For opponent-target cards, if there is exactly one opponent, cast immediately.
+    if (card.target === "opponent" && opponentTeamIds.length === 1) {
+      handleCastCard(card.id, opponentTeamIds[0]);
+      clearSelection();
+      return;
+    }
+
+    // Otherwise, use tap-to-select fallback.
+    if (selectedCardId === card.id) {
+      clearSelection();
+    } else {
+      selectCard(card.id);
+    }
+  };
+
+  const handleTeamClickForCast = (targetTeamId) => {
+    if (!selectedCardId || !teamId) return;
+    handleCastCard(selectedCardId, targetTeamId);
+    clearSelection();
+  };
+
   const handleLogout = () => {
     if (room) {
       room.leave();
@@ -776,80 +731,162 @@ export function Student() {
     window.location.replace("/login");
   };
 
-  return (
-    <div style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-        <h1>Student</h1>
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          <Link
-            to="/shop"
-            style={{
-              padding: "0.5rem 1rem",
-              backgroundColor: "#9c27b0",
-              color: "white",
-              textDecoration: "none",
-              borderRadius: "4px",
-              fontSize: "0.9rem",
-              fontWeight: "bold"
-            }}
-          >
-            🎴 Shop
-          </Link>
-          <button
-            onClick={handleLogout}
-            style={{
-              padding: "0.5rem 1rem",
-              backgroundColor: "#6c757d",
-              color: "white",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-              fontSize: "0.9rem"
-            }}
-          >
-            Logout
-          </button>
-        </div>
-      </div>
-      <div style={{ marginBottom: "1rem" }}>
-        Status:{" "}
-        <strong>
-          {connectionStatus === "connecting" && "Connecting..."}
-          {connectionStatus === "connected" && "Connected"}
-          {connectionStatus === "error" && "Error (see console)"}
-        </strong>
-      </div>
+  const roundVm = deriveRoundViewModel(state);
 
-      {errorMessage && (
-        <div style={{
-          padding: "1rem",
-          backgroundColor: "#ffebee",
-          color: "#c62828",
-          borderRadius: "4px",
-          marginBottom: "1rem",
-          border: "1px solid #ef5350"
-        }}>
-          <strong>Error:</strong> {errorMessage}
+  const hudProps = {
+    round: { ...roundVm, roundResult },
+    connectionStatus,
+    roomId: state.connection?.roomId,
+    teamName,
+    teamGold,
+    matchScores: matchScore,
+    matchOver,
+    moderation: moderationState,
+    playerId,
+    onLogout: handleLogout,
+    showShopLink: true,
+  };
+
+  const yourTeam = teamId
+    ? {
+        id: teamId,
+        name: teamName || teamId,
+        gold: teamGold,
+        writer,
+        locked: teamLocked,
+        isFrozen: moderationState.frozenTeams?.includes?.(teamId) || false,
+      }
+    : null;
+
+  const opponentTeams = opponentTeamIds.map((id) => {
+    const t = state.teams?.[id] || {};
+    return {
+      teamId: id,
+      name: t.name || id,
+      gold: t.gold || 0,
+      writer: t.writer || null,
+      locked: !!t.locked,
+      isFrozen: moderationState.frozenTeams?.includes?.(id) || false,
+    };
+  });
+
+  const arenaProps = {
+    yourTeam,
+    opponentTeams,
+    hoveredTeamId: hoveredTargetTeamId,
+    isTeamValidDropTarget,
+    registerDropRef,
+    onTeamClickForCast: selectedCardId ? handleTeamClickForCast : undefined,
+  };
+
+  const answerProps = {
+    isWriter,
+    teamId,
+    teamLocked,
+    teamAnswer,
+    suggestions,
+    onAnswerChange: handleAnswerChange,
+    onInsertSuggestion: handleInsertSuggestion,
+    onLockAnswer: handleLockAnswer,
+    canWriteAnswer: capabilities.canWriteAnswer,
+    suggestionText,
+    onSuggestionChange: setSuggestionText,
+    onSubmitSuggestion: handleSubmitSuggestion,
+    canSuggest: capabilities.canSuggest,
+  };
+
+  // Chapter 16: Determine if match has started (Round 1 active) and get deck filter
+  const matchStarted = state.round?.roundNumber >= 1 && roundState === "ROUND_ACTIVE";
+  const teamDeckSlots = teamId && state.teams?.[teamId]?.deckSlots 
+    ? state.teams[teamId].deckSlots 
+    : [null, null, null, null];
+  const deckFilterIds = matchStarted 
+    ? teamDeckSlots.filter(Boolean) // Only non-null card IDs
+    : null; // Show all cards pre-match
+
+  const handProps = {
+    gold: teamGold,
+    disabled: !capabilities.canCastCards,
+    roundActive,
+    availableTeams,
+    currentTeamId: teamId,
+    unlockedCards,
+    playerLevel,
+    disabledCards,
+    goldCostModifiers,
+    onCardPointerDown: handleCardPointerDown,
+    onCardClickForSelect: handleCardClickForSelect,
+    selectedCardId,
+    cardFilterIds: deckFilterIds, // Chapter 16: Filter to deck only when match started
+  };
+
+  const teamSelectionContent = (
+    <>
+      <h3>👥 Join or Create a Team</h3>
+      <p className="clash-team-select-sub">
+        Teams must have between {minTeamSize} and {maxTeamSize} members.
+      </p>
+      <div className="clash-team-row">
+        <input
+          type="text"
+          value={newTeamName}
+          onChange={(e) => setNewTeamName(e.target.value)}
+          placeholder="Enter team name (optional)"
+          className="clash-input"
+        />
+        <button
+          onClick={handleCreateTeam}
+          disabled={connectionStatus !== "connected"}
+          className="clash-btn clash-btn--primary"
+        >
+          Create Team
+        </button>
+      </div>
+      {availableTeams.length > 0 ? (
+        <div className="clash-team-list">
+          {availableTeams.map((team) => (
+            <div key={team.teamId} className="clash-team-card">
+              <div className="clash-team-card-main">
+                <strong>{team.teamId.toUpperCase()}</strong>
+                <div className="clash-team-card-sub">
+                  {team.currentSize}/{team.maxSize} members • Writer:{" "}
+                  {team.writerName}
+                </div>
+              </div>
+              <button
+                onClick={() => handleJoinTeam(team.teamId)}
+                disabled={connectionStatus !== "connected"}
+                className="clash-btn clash-btn--success"
+              >
+                Join
+              </button>
+            </div>
+          ))}
         </div>
+      ) : (
+        <p className="clash-team-empty">
+          No teams available. Create a new team to get started!
+        </p>
       )}
+    </>
+  );
 
-      {/* Match Result - Show even if not on a team (match is over) */}
-      {matchOver && matchResult && !matchResultDismissed && sessionStorage.getItem('matchResultDismissed') !== 'true' ? (
-        <MatchResult 
-          matchData={matchResult} 
-          teamId={teamId} 
+  return (
+    <>
+      {matchOver &&
+      matchResult &&
+      !matchResultDismissed &&
+      sessionStorage.getItem("matchResultDismissed") !== "true" ? (
+        <MatchResult
+          matchData={matchResult}
+          teamId={teamId}
           onClose={() => {
-            // Hide match result, mark as dismissed, leave room, and redirect to lobby
             setMatchResultDismissed(true);
-            sessionStorage.setItem('matchResultDismissed', 'true');
+            sessionStorage.setItem("matchResultDismissed", "true");
             setMatchOver(false);
-            
-            // Leave the quiz room
             if (room) {
               room.leave();
             }
-            
-            // Redirect to lobby after a short delay to allow state updates
             setTimeout(() => {
               navigate("/lobby");
             }, 100);
@@ -859,253 +896,31 @@ export function Student() {
         <RoundResult roundData={roundResult} teamId={teamId} />
       ) : null}
 
-      {!teamId ? (
-        /* Team Assembly UI */
-        <div style={{ marginBottom: "2rem", border: "2px solid #2196f3", padding: "1.5rem", borderRadius: "4px", backgroundColor: "#e3f2fd" }}>
-          <h3 style={{ color: "#2196f3", marginBottom: "1rem" }}>👥 Join or Create a Team</h3>
-          <div style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#666" }}>
-            Teams must have between {minTeamSize} and {maxTeamSize} members.
-          </div>
+      <StudentClashLayout
+        hudProps={hudProps}
+        hasTeam={!!teamId}
+        arenaProps={arenaProps}
+        answerProps={answerProps}
+        handProps={handProps}
+        teamSelectionContent={teamSelectionContent}
+        deckBuilderProps={teamId ? {
+          teamId,
+          deckSlots: teamDeckSlots,
+          teamCardPool: state.teams?.[teamId]?.teamCardPool || [],
+          deckLocked: state.teams?.[teamId]?.deckLocked || false,
+          matchStarted,
+          room,
+        } : null}
+      />
 
-          {/* Create Team */}
-          <div style={{ marginBottom: "1.5rem" }}>
-            <h4 style={{ marginBottom: "0.5rem" }}>Create New Team:</h4>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <input
-                type="text"
-                value={newTeamName}
-                onChange={(e) => setNewTeamName(e.target.value)}
-                placeholder="Enter team name (optional)"
-                style={{
-                  flex: 1,
-                  padding: "0.75rem",
-                  border: "2px solid #2196f3",
-                  borderRadius: "4px",
-                  fontSize: "1rem"
-                }}
-              />
-              <button
-                onClick={handleCreateTeam}
-                disabled={connectionStatus !== "connected"}
-                style={{
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: connectionStatus === "connected" ? "#2196f3" : "#ccc",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "4px",
-                  cursor: connectionStatus === "connected" ? "pointer" : "not-allowed",
-                  fontWeight: "bold"
-                }}
-              >
-                Create Team
-              </button>
-            </div>
-          </div>
-
-          {/* Join Existing Team */}
-          {availableTeams.length > 0 && (
-            <div>
-              <h4 style={{ marginBottom: "0.5rem" }}>Join Existing Team:</h4>
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                {availableTeams.map((team) => (
-                  <div
-                    key={team.teamId}
-                    style={{
-                      padding: "0.75rem",
-                      backgroundColor: "white",
-                      borderRadius: "4px",
-                      border: "1px solid #90caf9",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center"
-                    }}
-                  >
-                    <div>
-                      <strong>{team.teamId.toUpperCase()}</strong>
-                      <div style={{ fontSize: "0.85rem", color: "#666" }}>
-                        {team.currentSize}/{team.maxSize} members • Writer: {team.writerName}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleJoinTeam(team.teamId)}
-                      disabled={connectionStatus !== "connected"}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        backgroundColor: connectionStatus === "connected" ? "#4caf50" : "#ccc",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: connectionStatus === "connected" ? "pointer" : "not-allowed"
-                      }}
-                    >
-                      Join
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {availableTeams.length === 0 && (
-            <div style={{ color: "#666", fontStyle: "italic" }}>
-              No teams available. Create a new team to get started!
-            </div>
-          )}
-        </div>
-      ) : (
-        /* Team Management UI */
-        <>
-          <TeamStatus
-            teamId={teamId}
-            teamName={teamName}
-            isWriter={isWriter}
-            teamRole={isWriter ? "writer" : "suggester"}
-            writer={writer}
-            suggesters={suggesters}
-            locked={teamLocked}
-            onTransferWriter={handleTransferWriter}
-            currentClientSessionId={room?.sessionId}
-          />
-
-          <GoldDisplay gold={teamGold} teamId={teamId} />
-          
-          <XPBar xp={playerXP} level={playerLevel} />
-
-          <Scoreboard scores={matchScore} roundNumber={roundResult?.roundNumber || 0} matchOver={matchOver} />
-
-          {teamId && (
-            <CardBar
-              gold={teamGold}
-              onCastCard={handleCastCard}
-              disabled={teamLocked}
-              roundActive={roundActive}
-              availableTeams={availableTeams}
-              currentTeamId={teamId}
-              unlockedCards={unlockedCards}
-              playerLevel={playerLevel}
-              disabledCards={disabledCards}
-              goldCostModifiers={goldCostModifiers}
-            />
-          )}
-
-          <EffectsOverlay activeEffects={activeEffects} teamId={teamId} />
-          
-          {xpPopup && (
-            <XPPopup
-              amount={xpPopup.amount}
-              onComplete={() => setXPPopup(null)}
-            />
-          )}
-
-          {/* #region agent log */}
-          {(() => {
-            fetch('http://127.0.0.1:7243/ingest/30c23a0c-c564-4f36-b729-3b41b956410e',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Student.jsx:900',message:'Rendering result components',data:{matchOver,hasMatchResult:!!matchResult,hasRoundResult:!!roundResult},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-            return null;
-          })()}
-          {/* #endregion */}
-          
-          {/* Round Result - Only show if match is not over */}
-          {!matchOver && roundResult ? (
-            <RoundResult roundData={roundResult} teamId={teamId} />
-          ) : null}
-
-          {/* Writer Transfer Controls */}
-          {isWriter && Array.isArray(suggesters) && suggesters.length > 0 && (
-            <div style={{ marginBottom: "1rem", padding: "1rem", backgroundColor: "#fff9c4", borderRadius: "4px", border: "2px solid #fbc02d" }}>
-              <h4 style={{ marginBottom: "0.5rem", color: "#f57c00" }}>⚙️ Transfer Writer Role</h4>
-              {teamLocked ? (
-                <div style={{ color: "#666", fontStyle: "italic" }}>Cannot transfer writer role while round is locked.</div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                  {suggesters.map((suggesterId) => (
-                    <button
-                      key={suggesterId}
-                      onClick={() => handleTransferWriter(suggesterId)}
-                      style={{
-                        padding: "0.75rem 1rem",
-                        backgroundColor: "#ff9800",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        fontWeight: "bold",
-                        fontSize: "1rem"
-                      }}
-                    >
-                      👤 Transfer Writer Role to {suggesterId.substring(0, 20)}...
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Leave Team Button */}
-          {!roundActive && (
-            <button
-              onClick={handleLeaveTeam}
-              style={{
-                marginBottom: "1rem",
-                padding: "0.5rem 1rem",
-                backgroundColor: "#f44336",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: "pointer"
-              }}
-            >
-              Leave Team
-            </button>
-          )}
-        </>
-      )}
-
-      {/* Chapter 8: Question Display with State Messages */}
-      {roundState === "ROUND_ACTIVE" ? (
-        <QuestionDisplay
-          questionText={questionText}
-          roundActive={true}
-        />
-      ) : (
-        <div style={{ marginBottom: "2rem", padding: "2rem", backgroundColor: "#f5f5f5", borderRadius: "8px", textAlign: "center" }}>
-          <h2 style={{ color: "#666" }}>
-            {roundState === "ROUND_WAITING" && "⏳ Waiting for teacher to start round..."}
-            {roundState === "ROUND_REVIEW" && "✅ Round complete. Waiting for scoring..."}
-            {roundState === "ROUND_ENDED" && "🎯 Round scored. Waiting for next round..."}
-            {!roundState && "⏳ Waiting..."}
-          </h2>
-          {roundState === "ROUND_ACTIVE" && questionText && (
-            <p style={{ marginTop: "1rem", fontSize: "1.1rem" }}>{questionText}</p>
-          )}
-        </div>
-      )}
-      {/* Chapter 8: Timer only shows if enabled and active */}
-      {timerEnabled && roundState === "ROUND_ACTIVE" && (
-        <Timer timeRemaining={timeRemaining} />
-      )}
-
-      {/* Chapter 8: Input fields only enabled in ROUND_ACTIVE */}
-      {isWriter ? (
-        <WriterInput
-          teamAnswer={teamAnswer}
-          suggestions={suggestions}
-          onAnswerChange={handleAnswerChange}
-          onInsertSuggestion={handleInsertSuggestion}
-          onLockAnswer={handleLockAnswer}
-          disabled={roundState !== "ROUND_ACTIVE"}
-          locked={teamLocked}
-        />
-      ) : (
-        <SuggesterBox
-          suggestionText={suggestionText}
-          teamAnswer={teamAnswer}
-          onSuggestionChange={setSuggestionText}
-          onSubmitSuggestion={handleSubmitSuggestion}
-          disabled={roundState !== "ROUND_ACTIVE" || teamLocked}
+      {teamId && <EffectsOverlay activeEffects={activeEffects} teamId={teamId} />}
+      {xpPopup && (
+        <XPPopup
+          amount={xpPopup.amount}
+          onComplete={() => setXPPopup(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 

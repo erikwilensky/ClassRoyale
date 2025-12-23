@@ -1,8 +1,28 @@
 import React, { useState, useEffect } from "react";
 import { getToken } from "../utils/auth.js";
+import { getEffectiveGoldCost } from "../ui/drag/dragRules.js";
 
-// Chapter 10: CardBar now fetches cards from server and supports cosmetic cards
-export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeams, currentTeamId, unlockedCards = [], playerLevel = 1, disabledCards = new Set(), goldCostModifiers = {} }) {
+// Chapter 10/14/15: CardBar fetches cards and supports drag / tap-to-select casting
+// Chapter 16: Supports cardFilterIds to show only deck cards in-match
+export function CardBar({
+  className = "",
+  gold,
+  onCastCard,
+  disabled,
+  roundActive,
+  availableTeams,
+  currentTeamId,
+  unlockedCards = [],
+  playerLevel = 1,
+  disabledCards = new Set(),
+  goldCostModifiers = {},
+  // Drag + selection props from Student page
+  onCardPointerDown,
+  onCardClickForSelect,
+  selectedCardId = null,
+  // Chapter 16: Filter cards to only show these IDs (for deck-only view)
+  cardFilterIds = null,
+}) {
   const [selectedTarget, setSelectedTarget] = useState("");
   const [allCards, setAllCards] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -40,7 +60,7 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
     fetchCards();
   }, []);
 
-  const handleCardClick = (cardId) => {
+  const handleCardClick = (cardId, event) => {
     console.log("[CardBar] Card clicked:", cardId);
     const card = allCards.find(c => c.id === cardId);
     if (!card) {
@@ -50,15 +70,23 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
     
     console.log("[CardBar] Card found:", card.name, "target:", card.target, "selectedTarget:", selectedTarget);
     
-    if (card.target === "self") {
-      console.log("[CardBar] Casting self-target card:", cardId, "to team:", currentTeamId);
-      onCastCard(cardId, currentTeamId);
-    } else if (card.target === "opponent") {
-      if (selectedTarget && selectedTarget !== currentTeamId) {
-        console.log("[CardBar] Casting opponent-target card:", cardId, "to team:", selectedTarget);
-        onCastCard(cardId, selectedTarget);
-      } else {
-        console.warn("[CardBar] Cannot cast opponent card: no valid target selected");
+    if (onCardClickForSelect) {
+      onCardClickForSelect(card, event);
+      return;
+    }
+
+    // Legacy fallback (should not be used when drag system is active)
+    if (onCastCard) {
+      if (card.target === "self") {
+        console.log("[CardBar] Casting self-target card (fallback):", cardId, "to team:", currentTeamId);
+        onCastCard(cardId, currentTeamId);
+      } else if (card.target === "opponent") {
+        if (selectedTarget && selectedTarget !== currentTeamId) {
+          console.log("[CardBar] Casting opponent-target card (fallback):", cardId, "to team:", selectedTarget);
+          onCastCard(cardId, selectedTarget);
+        } else {
+          console.warn("[CardBar] Cannot cast opponent card (fallback): no valid target selected");
+        }
       }
     }
   };
@@ -74,35 +102,41 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
     if (!isCardUnlocked(card.id)) return true; // Locked cards are disabled
     if (disabled || !roundActive) return true;
 
-    // Cosmetic cards are always enabled (no gold cost, no modifier)
-    if (card.type === "cosmetic") return false;
-
     // Standard cards: use adjusted cost when checking affordability
-    const multiplier = typeof goldCostModifiers[card.id] === "number" ? goldCostModifiers[card.id] : 1.0;
-    const clampedMultiplier = Math.min(2.0, Math.max(0.5, multiplier));
-    let adjustedCost = Math.ceil(card.cost * clampedMultiplier);
-    if (adjustedCost < 1) adjustedCost = 1;
-
-    if (gold < adjustedCost) return true;
-    if (card.target === "opponent" && (!selectedTarget || selectedTarget === currentTeamId)) return true;
+    const effectiveCost = getEffectiveGoldCost({ card, goldCostModifiers });
+    if (gold < effectiveCost) return true;
     return false;
   };
 
   const getDisplayCost = (card) => {
     if (card.type === "cosmetic") return "Free";
-    const multiplier = typeof goldCostModifiers[card.id] === "number" ? goldCostModifiers[card.id] : 1.0;
-    const clampedMultiplier = Math.min(2.0, Math.max(0.5, multiplier));
-    let adjustedCost = Math.ceil(card.cost * clampedMultiplier);
-    if (adjustedCost < 1) adjustedCost = 1;
-    if (clampedMultiplier !== 1.0) {
-      return `${adjustedCost}💰 (${clampedMultiplier.toFixed(1)}x)`;
+    const effectiveCost = getEffectiveGoldCost({ card, goldCostModifiers });
+    const multiplier =
+      typeof goldCostModifiers[card.id] === "number"
+        ? goldCostModifiers[card.id]
+        : 1.0;
+    if (multiplier !== 1.0) {
+      return `${effectiveCost}💰 (${multiplier.toFixed(1)}x)`;
     }
-    return `${card.cost}💰`;
+    return `${effectiveCost}💰`;
   };
   
+  // Chapter 16: Filter cards if cardFilterIds is provided
+  let filteredCards = allCards;
+  if (cardFilterIds && Array.isArray(cardFilterIds) && cardFilterIds.length > 0) {
+    const filterSet = new Set(cardFilterIds.filter(Boolean)); // Remove nulls
+    filteredCards = allCards.filter(card => filterSet.has(card.id));
+    // Preserve order based on cardFilterIds
+    filteredCards.sort((a, b) => {
+      const indexA = cardFilterIds.indexOf(a.id);
+      const indexB = cardFilterIds.indexOf(b.id);
+      return indexA - indexB;
+    });
+  }
+
   // Separate cards by type and unlock status
-  const standardCards = allCards.filter(card => card.type === "standard");
-  const cosmeticCards = allCards.filter(card => card.type === "cosmetic");
+  const standardCards = filteredCards.filter(card => card.type === "standard");
+  const cosmeticCards = filteredCards.filter(card => card.type === "cosmetic");
   
   const unlockedStandardCards = standardCards.filter(card => isCardUnlocked(card.id));
   const lockedStandardCards = standardCards.filter(card => !isCardUnlocked(card.id));
@@ -110,7 +144,16 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
 
   if (loading) {
     return (
-      <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#f5f5f5", borderRadius: "4px", border: "1px solid #ddd" }}>
+      <div
+        className={["clash-cardbar", className].filter(Boolean).join(" ")}
+        style={{
+          marginTop: "1rem",
+          padding: "1rem",
+          backgroundColor: "#f5f5f5",
+          borderRadius: "4px",
+          border: "1px solid #ddd",
+        }}
+      >
         <h3 style={{ marginBottom: "0.75rem" }}>🎴 Cards</h3>
         <div>Loading cards...</div>
       </div>
@@ -118,12 +161,22 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
   }
 
   // Debug: Log card counts
-  console.log("[CardBar] Render - allCards:", allCards.length, "unlockedCards prop:", unlockedCards.length);
+  console.log("[CardBar] Render - allCards:", allCards.length, "filteredCards:", filteredCards.length, "unlockedCards prop:", unlockedCards.length);
+  console.log("[CardBar] cardFilterIds:", cardFilterIds);
   console.log("[CardBar] standardCards:", standardCards.length, "cosmeticCards:", cosmeticCards.length);
   console.log("[CardBar] unlockedStandard:", unlockedStandardCards.length, "lockedStandard:", lockedStandardCards.length, "unlockedCosmetic:", unlockedCosmeticCards.length);
 
   return (
-    <div style={{ marginTop: "1rem", padding: "1rem", backgroundColor: "#f5f5f5", borderRadius: "4px", border: "1px solid #ddd" }}>
+    <div
+      className={["clash-cardbar", className].filter(Boolean).join(" ")}
+      style={{
+        marginTop: "1rem",
+        padding: "1rem",
+        backgroundColor: "#f5f5f5",
+        borderRadius: "4px",
+        border: "1px solid #ddd",
+      }}
+    >
       <h3 style={{ marginBottom: "0.75rem" }}>🎴 Cards</h3>
       
       {allCards.length === 0 && !loading && (
@@ -135,36 +188,6 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
         <div style={{ color: "#666", fontStyle: "italic" }}>No cards found in response.</div>
       )}
       
-      {/* Target selector for opponent cards */}
-      {standardCards.some(card => card.target === "opponent" && isCardUnlocked(card.id)) && availableTeams && availableTeams.length > 0 && (
-        <div style={{ marginBottom: "0.75rem" }}>
-          <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.9rem", fontWeight: "bold" }}>
-            Target Team (for opponent cards):
-          </label>
-          <select
-            value={selectedTarget}
-            onChange={(e) => setSelectedTarget(e.target.value)}
-            disabled={disabled || !roundActive}
-            style={{
-              padding: "0.5rem",
-              borderRadius: "4px",
-              border: "1px solid #ccc",
-              width: "100%",
-              maxWidth: "300px"
-            }}
-          >
-            <option value="">Select target team...</option>
-            {availableTeams
-              .filter(team => team.teamId !== currentTeamId)
-              .map(team => (
-                <option key={team.teamId} value={team.teamId}>
-                  {team.teamId} ({team.currentSize}/{team.maxSize} members)
-                </option>
-              ))}
-          </select>
-        </div>
-      )}
-
       {/* Standard Cards - Show all (unlocked and locked) */}
       {standardCards.length > 0 && (
         <div style={{ marginBottom: "1rem" }}>
@@ -173,20 +196,25 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
             {/* Unlocked standard cards */}
             {unlockedStandardCards.map((card) => {
               const cardDisabled = isCardDisabled(card);
-              const multiplier = typeof goldCostModifiers[card.id] === "number" ? goldCostModifiers[card.id] : 1.0;
-              const clampedMultiplier = Math.min(2.0, Math.max(0.5, multiplier));
-              let adjustedCost = Math.ceil(card.cost * clampedMultiplier);
-              if (adjustedCost < 1) adjustedCost = 1;
-              const canAfford = gold >= adjustedCost;
+              const effectiveCost = getEffectiveGoldCost({ card, goldCostModifiers });
+              const canAfford = gold >= effectiveCost;
+              const isSelected = selectedCardId === card.id;
               
               return (
                 <button
                   key={card.id}
-                  onClick={() => handleCardClick(card.id)}
+                  onClick={(e) => handleCardClick(card.id, e)}
+                  onPointerDown={onCardPointerDown ? (e) => onCardPointerDown(card, e) : undefined}
                   disabled={cardDisabled}
                   style={{
                     padding: "0.75rem 1rem",
-                    backgroundColor: cardDisabled ? "#ccc" : (card.target === "self" ? "#4caf50" : "#f44336"),
+                    backgroundColor: cardDisabled
+                      ? "#ccc"
+                      : isSelected
+                      ? "#1976d2"
+                      : card.target === "self"
+                      ? "#4caf50"
+                      : "#f44336",
                     color: "white",
                     border: "none",
                     borderRadius: "4px",
@@ -207,9 +235,7 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
                       ? !roundActive
                         ? "Round not active"
                         : !canAfford
-                        ? `Need ${adjustedCost} gold, have ${gold}`
-                        : card.target === "opponent" && (!selectedTarget || selectedTarget === currentTeamId)
-                        ? "Select a valid target team"
+                        ? `Need ${effectiveCost} gold, have ${gold}`
                         : "Cannot cast"
                       : `Cast ${card.name} (${getDisplayCost(card)})`
                   }
@@ -273,12 +299,14 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
           <h4 style={{ fontSize: "0.9rem", marginBottom: "0.5rem", color: "#666" }}>✨ Cosmetic Cards</h4>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
             {unlockedCosmeticCards.map((card) => {
-              const cardDisabled = disabled || !roundActive;
+              // Check if card is disabled (match-level disable or round not active)
+              const cardDisabled = isCardDisabled(card);
+              const isMatchDisabled = disabledCards && disabledCards.has(card.id);
               
               return (
                 <button
                   key={card.id}
-                  onClick={() => handleCardClick(card.id)}
+                  onClick={(e) => handleCardClick(card.id, e)}
                   disabled={cardDisabled}
                   style={{
                     padding: "0.75rem 1rem",
@@ -295,7 +323,13 @@ export function CardBar({ gold, onCastCard, disabled, roundActive, availableTeam
                     alignItems: "center",
                     minWidth: "120px"
                   }}
-                  title={cardDisabled ? "Round not active" : `Use ${card.name} (Free)`}
+                  title={
+                    isMatchDisabled
+                      ? "Disabled this match by teacher"
+                      : cardDisabled
+                      ? "Round not active"
+                      : `Use ${card.name} (Free)`
+                  }
                 >
                   <span>✨ {card.name}</span>
                   <span style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>

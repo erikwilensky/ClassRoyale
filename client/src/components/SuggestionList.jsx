@@ -1,24 +1,30 @@
 import React from "react";
 
-export function SuggestionList({ suggestions, onInsert, disabled }) {
+export function SuggestionList({ 
+  suggestions, 
+  onInsert, 
+  disabled,
+  // Chapter 17.2: Themeable className props
+  className = "",
+  emptyStateClassName = "clash-empty-state",
+  listClassName = "clash-list",
+  itemClassName = "clash-list-item",
+  itemButtonClassName = "clash-btn clash-btn--secondary",
+}) {
   if (!suggestions || suggestions.length === 0) {
     return (
-      <div style={{ 
-        padding: "1rem", 
-        backgroundColor: "#f5f5f5", 
-        borderRadius: "4px",
-        color: "#666",
-        fontStyle: "italic"
-      }}>
+      <div className={emptyStateClassName}>
         No suggestions yet. Waiting for team members to propose text...
       </div>
     );
   }
 
   return (
-    <div style={{ marginTop: "1rem" }}>
-      <h4 style={{ marginBottom: "0.5rem" }}>Suggestions from Team ({suggestions.length}):</h4>
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+    <div className={className || ""}>
+      <h4 style={{ marginBottom: "0.5rem", fontSize: "0.9rem", fontWeight: 600, color: "#cfd8dc" }}>
+        Suggestions from Team ({suggestions.length}):
+      </h4>
+      <div className={listClassName}>
         {suggestions.map((suggestion, index) => {
           const timestamp = suggestion.timestamp 
             ? new Date(suggestion.timestamp).toLocaleTimeString() 
@@ -27,21 +33,13 @@ export function SuggestionList({ suggestions, onInsert, disabled }) {
           return (
             <div
               key={index}
-              style={{
-                padding: "0.75rem",
-                backgroundColor: "#fff9c4",
-                borderRadius: "4px",
-                border: "1px solid #fbc02d",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center"
-              }}
+              className={itemClassName}
             >
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: "bold", marginBottom: "0.25rem" }}>
+              <div className="clash-list-item-content">
+                <div className="clash-list-item-text">
                   "{suggestion.text}"
                 </div>
-                <div style={{ fontSize: "0.8rem", color: "#666" }}>
+                <div className="clash-list-item-meta">
                   From: {suggestion.suggesterId?.substring(0, 8)}... • {timestamp}
                 </div>
               </div>
@@ -54,16 +52,8 @@ export function SuggestionList({ suggestions, onInsert, disabled }) {
                   }
                 }}
                 disabled={disabled}
-                style={{
-                  marginLeft: "1rem",
-                  padding: "0.5rem 1rem",
-                  backgroundColor: disabled ? "#ccc" : "#4caf50",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "4px",
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  fontWeight: "bold"
-                }}
+                className={itemButtonClassName}
+                style={{ marginLeft: "1rem" }}
               >
                 Insert
               </button>

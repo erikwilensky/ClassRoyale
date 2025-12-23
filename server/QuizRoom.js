@@ -5,6 +5,9 @@ import { getPlayerUnlockedCards } from "./services/xpService.js";
 import { db } from "./db/database.js";
 import { CardSystem } from "./systems/cardSystem.js";
 import { ScoringSystem } from "./systems/scoringSystem.js";
+import { canPerformAction, isRoundFrozen } from "./systems/moderationGate.js";
+import { logDebug } from "./utils/log.js";
+import { CARDS } from "./config/cards.js";
 
 // Suggestion state schema
 class SuggestionState extends Schema {
@@ -23,6 +26,10 @@ class TeamState extends Schema {
     suggestions = new ArraySchema(); // Array of SuggestionState
     gold = 0;
     name = ""; // Team name from lobby
+    // Chapter 16: Team deck (4 slots)
+    deckSlots = new ArraySchema(); // Array of 4: cardId or null
+    deckLocked = false;
+    teamCardPool = new ArraySchema(); // Array of card IDs (union of all team members' unlocked cards)
 }
 
 // Quiz state schema
@@ -44,6 +51,9 @@ export class QuizRoom extends Room {
     // Writer rotation tracking
     writerRotationIndices = new Map(); // teamId -> current rotation index
     
+    // Chapter 16: Match lifecycle
+    matchStarted = false; // Set to true when Round 1 starts, reset on match reset
+    
     // Chapter 11.5: System modules
     cardSystem = null;
     scoringSystem = null;
@@ -60,6 +70,13 @@ export class QuizRoom extends Room {
     
     // Track answer ownership for individual scoring
     answers = new Map();  // roundNumber -> Map<teamId, { text, writerId, suggesterIds: [] }>
+    
+    // Chapter 12: Moderation state (ephemeral, resets on round/match end)
+    moderationState = {
+        mutedPlayers: new Set(),      // playerId
+        frozenTeams: new Set(),        // teamId
+        roundFrozen: false
+    };
 
     onCreate(options) {
         this.setState(new QuizState());
@@ -104,11 +121,17 @@ export class QuizRoom extends Room {
             team.answer = "";
             team.locked = false;
             team.gold = 0;
+            // Chapter 16: Initialize deck slots (4 empty slots)
+            team.deckSlots = new ArraySchema(null, null, null, null);
+            team.deckLocked = false;
+            team.teamCardPool = new ArraySchema();
             this.state.teams.set(teamId, team);
             this.state.gold.set(teamId, 0);
 
             // Delay sending TEAM_JOINED to allow client to register handlers
-            setTimeout(() => {
+            setTimeout(async () => {
+                // Chapter 16: Update team card pool when team is created
+                await this.updateTeamCardPool(teamId);
                 client.send("TEAM_JOINED", {
                     teamId,
                     isWriter: true,
@@ -158,7 +181,9 @@ export class QuizRoom extends Room {
             }
 
             // Delay sending TEAM_JOINED to allow client to register handlers
-            setTimeout(() => {
+            setTimeout(async () => {
+                // Chapter 16: Update team card pool when member joins
+                await this.updateTeamCardPool(teamId);
                 client.send("TEAM_JOINED", {
                     teamId,
                     isWriter: false,
@@ -225,6 +250,10 @@ export class QuizRoom extends Room {
                 }
 
                 client.send("TEAM_LEFT", {});
+                // Chapter 16: Update team card pool when member leaves (if team still exists)
+                if (this.state.teams.has(teamId)) {
+                    this.updateTeamCardPool(teamId);
+                }
                 this.broadcastTeamUpdate();
                 this.broadcastAvailableTeams();
                 return;
@@ -266,6 +295,8 @@ export class QuizRoom extends Room {
                 newWriter: newWriterId
             });
 
+            // Chapter 16: Update team card pool when writer transfers
+            this.updateTeamCardPool(teamId);
             this.broadcastTeamUpdate();
         });
 
@@ -282,6 +313,16 @@ export class QuizRoom extends Room {
 
             const teamId = Array.from(this.state.teams.entries()).find(([_, t]) => t === team)[0];
             if (team.locked || this.state.roundState !== "ROUND_ACTIVE") return;
+
+            // Chapter 13: Use centralized moderation gate
+            const canPerform = canPerformAction(this, {
+                playerId: client.metadata.playerId,
+                teamId: teamId,
+                action: "suggestion"
+            });
+            if (!canPerform.ok) {
+                return; // Silent failure
+            }
 
             const suggestion = new SuggestionState();
             suggestion.text = message.text;
@@ -324,6 +365,16 @@ export class QuizRoom extends Room {
             if (!team || team.locked || this.state.roundState !== "ROUND_ACTIVE") return;
 
             const teamId = Array.from(this.state.teams.entries()).find(([_, t]) => t === team)[0];
+
+            // Chapter 13: Use centralized moderation gate
+            const canPerform = canPerformAction(this, {
+                playerId: client.metadata.playerId,
+                teamId: teamId,
+                action: "insertSuggestion"
+            });
+            if (!canPerform.ok) {
+                return; // Silent failure
+            }
 
             // Find suggestion by suggesterId and timestamp
             const suggesterId = message.suggesterId;
@@ -372,6 +423,18 @@ export class QuizRoom extends Room {
             );
             if (!team || team.locked || this.state.roundState !== "ROUND_ACTIVE") return;
 
+            const teamId = Array.from(this.state.teams.entries()).find(([_, t]) => t === team)[0];
+
+            // Chapter 13: Use centralized moderation gate
+            const canPerform = canPerformAction(this, {
+                playerId: client.metadata.playerId,
+                teamId: teamId,
+                action: "updateAnswer"
+            });
+            if (!canPerform.ok) {
+                return; // Silent failure
+            }
+
             team.answer = message.answer || "";
             this.broadcastTeamUpdate();
         });
@@ -416,6 +479,17 @@ export class QuizRoom extends Room {
                 client.send("ERROR", { message: "You are not the writer for any team" });
                 return;
             }
+
+            // Chapter 13: Use centralized moderation gate
+            const canPerform = canPerformAction(this, {
+                playerId: playerId,
+                teamId: teamId,
+                action: "lockAnswer"
+            });
+            if (!canPerform.ok) {
+                return; // Silent failure
+            }
+
             if (team.locked) {
                 console.log(`[QuizRoom] lockAnswer rejected: team already locked`);
                 client.send("ERROR", { message: "Answer already locked" });
@@ -443,6 +517,75 @@ export class QuizRoom extends Room {
         // Chapter 11.5: Card system - delegate to cardSystem
         this.onMessage("castCard", (client, message) => {
             this.cardSystem.handleCastCard(client, message);
+        });
+
+        // Chapter 16: Team deck editing
+        this.onMessage("SET_TEAM_DECK_SLOT", async (client, message) => {
+            if (client.metadata.isDisplay) {
+                client.send("ERROR", { message: "Display clients cannot perform this action." });
+                return;
+            }
+            if (client.metadata.role !== "student") {
+                client.send("ERROR", { message: "Only students can edit team decks." });
+                return;
+            }
+
+            const { slotIndex, cardId } = message;
+
+            // Find team for this client
+            const { team, casterTeamId } = this.cardSystem.findTeamForClient(client);
+            if (!team) {
+                client.send("ERROR", { message: "You are not in a team" });
+                return;
+            }
+
+            // Authorization: any team member can edit
+            // (already verified by finding team)
+
+            // Guards
+            if (this.matchStarted || team.deckLocked) {
+                client.send("ERROR", { message: "Deck is locked. Cannot edit deck after match starts." });
+                return;
+            }
+
+            if (slotIndex < 0 || slotIndex > 3) {
+                client.send("ERROR", { message: "Invalid slot index. Must be 0-3." });
+                return;
+            }
+
+            // If cardId is provided, validate it
+            if (cardId !== null && cardId !== undefined && cardId !== "") {
+                // Card must exist in config
+                if (!CARDS[cardId]) {
+                    client.send("ERROR", { message: "Invalid card ID" });
+                    return;
+                }
+
+                // Card must be in team's card pool
+                if (!team.teamCardPool.includes(cardId)) {
+                    client.send("ERROR", { message: "Card not available in team card pool" });
+                    return;
+                }
+
+                // Card must not be disabled for this match
+                if (this.cardSystem.matchCardRules.disabledCards.has(cardId)) {
+                    client.send("ERROR", { message: "This card is disabled for this match" });
+                    return;
+                }
+
+                // Prevent duplicates in deck slots
+                for (let i = 0; i < team.deckSlots.length; i++) {
+                    if (i !== slotIndex && team.deckSlots[i] === cardId) {
+                        client.send("ERROR", { message: "Card already in deck. Each card can only be used once." });
+                        return;
+                    }
+                }
+            }
+
+            // Apply change
+            team.deckSlots[slotIndex] = cardId || null;
+            this.broadcastTeamUpdate();
+            console.log(`[QuizRoom] Team ${casterTeamId} deck slot ${slotIndex} set to ${cardId || "empty"}`);
         });
 
         // Round management - Chapter 8: Round Lifecycle
@@ -524,6 +667,16 @@ export class QuizRoom extends Room {
 
             // Transition to ROUND_ACTIVE
             this.state.roundState = "ROUND_ACTIVE";
+            
+            // Chapter 16: Lock decks when match starts (Round 1)
+            if (this.scores.roundNumber === 1 && !this.matchStarted) {
+                this.matchStarted = true;
+                // Lock all team decks
+                for (const team of this.state.teams.values()) {
+                    team.deckLocked = true;
+                }
+                console.log("[QuizRoom] Match started - decks locked");
+            }
             
             // Set timer duration if provided (optional)
             if (message.duration !== undefined) {
@@ -839,11 +992,14 @@ export class QuizRoom extends Room {
                 mvp: mvp
             });
 
+            // Chapter 12: Reset moderation state when match ends
+            this.resetModerationState();
+
             console.log(`[QuizRoom] Match ended manually. Winner: ${winnerTeamId}`);
         });
 
         // Reset match to start a new match
-        this.onMessage("RESET_MATCH", (client, message) => {
+        this.onMessage("RESET_MATCH", async (client, message) => {
             if (client.metadata.isDisplay) {
                 client.send("ERROR", { message: "Display clients cannot perform this action." });
                 return;
@@ -862,6 +1018,15 @@ export class QuizRoom extends Room {
             this.scores.roundScores.clear();
             this.answers.clear();
             
+            // Chapter 16: Reset match lifecycle and deck state
+            this.matchStarted = false;
+            for (const team of this.state.teams.values()) {
+                // Reset deck slots to empty
+                team.deckSlots = new ArraySchema(null, null, null, null);
+                team.deckLocked = false;
+                team.teamCardPool = new ArraySchema();
+            }
+            
             // Reset round state
             this.state.roundState = "ROUND_WAITING";
             this.state.questionText = "";
@@ -871,6 +1036,40 @@ export class QuizRoom extends Room {
 
             // Chapter 11.5: reset match-level card rules - delegate to cardSystem
             this.cardSystem.resetRules();
+            
+            // Chapter 12: Reset moderation state on match reset
+            this.resetModerationState();
+            
+            // Auto-load teacher's default card settings if available
+            if (client.metadata && client.metadata.playerId) {
+                try {
+                    const { getTeacherDefaultSettings } = await import("./services/teacherCardSettings.js");
+                    const defaults = getTeacherDefaultSettings(client.metadata.playerId);
+                    if (defaults && (defaults.disabledCards.length > 0 || Object.keys(defaults.goldCostModifiers).length > 0)) {
+                        console.log(`[QuizRoom] Auto-loading default card settings for teacher ${client.metadata.playerId}`);
+                        // Apply defaults
+                        for (const cardId of defaults.disabledCards) {
+                            try {
+                                this.cardSystem.disableCard(cardId);
+                            } catch (error) {
+                                console.warn(`[QuizRoom] Failed to disable card ${cardId}:`, error.message);
+                            }
+                        }
+                        for (const [cardId, multiplier] of Object.entries(defaults.goldCostModifiers)) {
+                            try {
+                                this.cardSystem.setCostModifier(cardId, multiplier);
+                            } catch (error) {
+                                console.warn(`[QuizRoom] Failed to set modifier for ${cardId}:`, error.message);
+                            }
+                        }
+                        // Broadcast the update
+                        this.cardSystem.broadcastRulesUpdate();
+                        console.log(`[QuizRoom] Default card settings auto-loaded`);
+                    }
+                } catch (error) {
+                    console.warn(`[QuizRoom] Failed to auto-load default card settings:`, error.message);
+                }
+            }
             
             // Reset team answers and gold
             for (const [teamId, team] of this.state.teams.entries()) {
@@ -918,11 +1117,14 @@ export class QuizRoom extends Room {
         const role = options.role || "student";
         client.metadata = { role };
         
+        logDebug(`[QuizRoom] Client joined: role=${role}, sessionId=${client.sessionId}`);
+        
         // Chapter 9: Handle display role
         if (role === "display") {
             client.metadata.isDisplay = true;
             // Display clients don't need playerId, team assignments, or XP
             // They just receive state updates
+            logDebug(`[QuizRoom] Display client joined, initial state sync: roundState=${this.state.roundState}, teams=${this.state.teams.size}`);
         } else {
             // Verify JWT token if provided (for non-display clients)
             if (options.token) {
@@ -935,9 +1137,7 @@ export class QuizRoom extends Room {
                     if (!client.metadata.isTeacher) {
                         const unlockedCards = getPlayerUnlockedCards(decoded.playerId);
                         client.metadata.unlockedCards = unlockedCards;
-
-                        // Initialize XP cache entry
-                        this.xpCache.set(decoded.playerId, { totalXP: 0, reasons: [] });
+                        // XP cache will be initialized automatically when XP is first awarded
                     }
                 }
             }
@@ -1009,7 +1209,9 @@ export class QuizRoom extends Room {
                     
                     // Delay sending TEAM_JOINED to allow client to register handlers
                     // This prevents the race condition where message arrives before handler is ready
-                    setTimeout(() => {
+                    setTimeout(async () => {
+                        // Chapter 16: Update team card pool when player joins from lobby
+                        await this.updateTeamCardPool(teamId);
                         client.send("TEAM_JOINED", {
                             teamId,
                             isWriter: team.writer === client.sessionId,
@@ -1229,6 +1431,9 @@ export class QuizRoom extends Room {
                     maxTeamSize: this.maxTeamSize
                 });
 
+                // Chapter 12: Send initial moderation state
+                this.broadcastModerationUpdate();
+
                 this.broadcastAvailableTeams();
             }
         }, 150);
@@ -1260,9 +1465,10 @@ export class QuizRoom extends Room {
             }
         }
 
-        // Clear XP cache if player left
+        // Clear XP cache if player left (delegate to scoringSystem)
         if (client.metadata && client.metadata.playerId) {
-            this.xpCache.delete(client.metadata.playerId);
+            // XP cache is managed by scoringSystem - no need to manually delete
+            // The scoringSystem will handle cleanup when XP is flushed
         }
 
         if (this.clients.length === 0 && this.timerInterval) {
@@ -1289,6 +1495,10 @@ export class QuizRoom extends Room {
             team.locked = false;
             team.gold = 0;
             team.name = teamData.name || teamId; // Store team name from lobby
+            // Chapter 16: Initialize deck slots (4 empty slots)
+            team.deckSlots = new ArraySchema(null, null, null, null);
+            team.deckLocked = false;
+            team.teamCardPool = new ArraySchema();
             this.state.teams.set(teamId, team);
             this.state.gold.set(teamId, 0);
             
@@ -1331,6 +1541,11 @@ export class QuizRoom extends Room {
                 clearInterval(this.timerInterval);
                 this.timerInterval = null;
                 return;
+            }
+
+            // Chapter 13: Pause timer if round is frozen (use moderation gate)
+            if (isRoundFrozen(this)) {
+                return; // Don't decrement timer when round is frozen - timer stays constant
             }
 
             this.state.timeRemaining = Math.max(0, this.state.timeRemaining - 1);
@@ -1392,6 +1607,9 @@ export class QuizRoom extends Room {
         }
 
         this.state.activeEffects.clear();
+
+        // Chapter 12: Reset moderation state on round end
+        this.resetModerationState();
 
         // Chapter 11.5: Collect answers and award participation XP - delegate to scoringSystem
         const roundAnswers = this.scoringSystem.collectAnswers();
@@ -1663,14 +1881,96 @@ export class QuizRoom extends Room {
     }
 
     // Broadcast full team state and current card rules to all non-display clients
+    /**
+     * Chapter 16: Compute team card pool (union of all team members' unlocked cards)
+     */
+    async computeTeamCardPool(teamId) {
+        const team = this.state.teams.get(teamId);
+        if (!team) {
+            console.warn(`[QuizRoom] computeTeamCardPool: team ${teamId} not found`);
+            return [];
+        }
+
+        // Collect all playerIds for this team
+        const playerIds = new Set();
+        
+        // Get writer playerId
+        if (team.writerPlayerId) {
+            playerIds.add(team.writerPlayerId);
+        } else if (team.writer) {
+            const writerClient = this.clients.find(c => c.sessionId === team.writer);
+            if (writerClient?.metadata?.playerId) {
+                playerIds.add(writerClient.metadata.playerId);
+            }
+        }
+
+        // Get suggester playerIds
+        for (const suggesterSessionId of team.suggesters) {
+            const suggesterClient = this.clients.find(c => c.sessionId === suggesterSessionId);
+            if (suggesterClient?.metadata?.playerId) {
+                playerIds.add(suggesterClient.metadata.playerId);
+            }
+        }
+
+        // Union all unlocked cards
+        const cardPoolSet = new Set();
+        for (const playerId of playerIds) {
+            const unlockedCards = getPlayerUnlockedCards(playerId);
+            for (const cardId of unlockedCards) {
+                // Filter against authoritative card config
+                if (CARDS[cardId]) {
+                    cardPoolSet.add(cardId);
+                }
+            }
+        }
+
+        return Array.from(cardPoolSet);
+    }
+
+    /**
+     * Chapter 16: Recompute and update team card pool, then broadcast
+     */
+    async updateTeamCardPool(teamId) {
+        const team = this.state.teams.get(teamId);
+        if (!team) return;
+
+        const pool = await this.computeTeamCardPool(teamId);
+        team.teamCardPool = new ArraySchema(...pool);
+        this.broadcastTeamUpdate();
+        console.log(`[QuizRoom] Updated card pool for team ${teamId}: ${pool.length} cards`);
+    }
+
     broadcastTeamUpdate() {
         const teamsData = {};
         for (const [teamId, team] of this.state.teams.entries()) {
+            // Get writerPlayerId from team state or by looking up the writer client
+            let writerPlayerId = team.writerPlayerId || "";
+            if (!writerPlayerId && team.writer) {
+                const writerClient = this.clients.find(c => c.sessionId === team.writer);
+                if (writerClient && writerClient.metadata && writerClient.metadata.playerId) {
+                    writerPlayerId = writerClient.metadata.playerId;
+                }
+            }
+            
+            // Get playerIds for suggesters
+            const suggesterPlayerIds = [];
+            for (const suggesterSessionId of team.suggesters) {
+                const suggesterClient = this.clients.find(c => c.sessionId === suggesterSessionId);
+                if (suggesterClient && suggesterClient.metadata && suggesterClient.metadata.playerId) {
+                    suggesterPlayerIds.push({
+                        sessionId: suggesterSessionId,
+                        playerId: suggesterClient.metadata.playerId
+                    });
+                }
+            }
+            
             teamsData[teamId] = {
                 teamId: teamId,
                 name: team.name || teamId, // Include team name
                 writer: team.writer,
+                writerPlayerId: writerPlayerId, // Chapter 12: Include playerId for moderation
                 suggesters: Array.from(team.suggesters),
+                suggesterPlayerIds: suggesterPlayerIds, // Chapter 12: Include playerIds for suggesters
                 answer: team.answer,
                 locked: team.locked,
                 gold: team.gold,
@@ -1678,7 +1978,11 @@ export class QuizRoom extends Room {
                     text: s.text,
                     suggesterId: s.suggesterId,
                     timestamp: s.timestamp
-                }))
+                })),
+                // Chapter 16: Include deck state
+                deckSlots: Array.from(team.deckSlots || []),
+                deckLocked: team.deckLocked || false,
+                teamCardPool: Array.from(team.teamCardPool || [])
             };
         }
 
@@ -1692,11 +1996,34 @@ export class QuizRoom extends Room {
         // Send team update to a specific client (useful for teacher on join)
         const teamsData = {};
         for (const [teamId, team] of this.state.teams.entries()) {
+            // Get writerPlayerId from team state or by looking up the writer client
+            let writerPlayerId = team.writerPlayerId || "";
+            if (!writerPlayerId && team.writer) {
+                const writerClient = this.clients.find(c => c.sessionId === team.writer);
+                if (writerClient && writerClient.metadata && writerClient.metadata.playerId) {
+                    writerPlayerId = writerClient.metadata.playerId;
+                }
+            }
+            
+            // Get playerIds for suggesters
+            const suggesterPlayerIds = [];
+            for (const suggesterSessionId of team.suggesters) {
+                const suggesterClient = this.clients.find(c => c.sessionId === suggesterSessionId);
+                if (suggesterClient && suggesterClient.metadata && suggesterClient.metadata.playerId) {
+                    suggesterPlayerIds.push({
+                        sessionId: suggesterSessionId,
+                        playerId: suggesterClient.metadata.playerId
+                    });
+                }
+            }
+            
             teamsData[teamId] = {
                 teamId: teamId,
                 name: team.name || teamId,
                 writer: team.writer,
+                writerPlayerId: writerPlayerId, // Chapter 12: Include playerId for moderation
                 suggesters: Array.from(team.suggesters),
+                suggesterPlayerIds: suggesterPlayerIds, // Chapter 12: Include playerIds for suggesters
                 answer: team.answer,
                 locked: team.locked,
                 gold: team.gold,
@@ -1704,7 +2031,11 @@ export class QuizRoom extends Room {
                     text: s.text,
                     suggesterId: s.suggesterId,
                     timestamp: s.timestamp
-                }))
+                })),
+                // Chapter 16: Include deck state
+                deckSlots: Array.from(team.deckSlots || []),
+                deckLocked: team.deckLocked || false,
+                teamCardPool: Array.from(team.teamCardPool || [])
             };
         }
 
@@ -1773,5 +2104,24 @@ export class QuizRoom extends Room {
 
     applyOverride(teamId, playerId, round, newEvaluationScore) {
         return this.scoringSystem.applyOverride(teamId, playerId, round, newEvaluationScore);
+    }
+
+    // Chapter 12: Reset moderation state (called on round/match transitions)
+    resetModerationState() {
+        if (!this.moderationState) return;
+        this.moderationState.mutedPlayers.clear();
+        this.moderationState.frozenTeams.clear();
+        this.moderationState.roundFrozen = false;
+        this.broadcastModerationUpdate();
+    }
+
+    // Chapter 12: Broadcast moderation state to all clients
+    broadcastModerationUpdate() {
+        if (!this.moderationState) return;
+        this.broadcast("MODERATION_UPDATE", {
+            mutedPlayers: Array.from(this.moderationState.mutedPlayers),
+            frozenTeams: Array.from(this.moderationState.frozenTeams),
+            roundFrozen: this.moderationState.roundFrozen
+        });
     }
 }

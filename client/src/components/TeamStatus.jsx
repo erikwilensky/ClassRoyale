@@ -1,6 +1,21 @@
-import React from "react";
+import React, { useRef, useEffect } from "react";
 
-export function TeamStatus({ teamId, teamName, isWriter, teamRole, writer, suggesters, locked, onTransferWriter, currentClientSessionId }) {
+export function TeamStatus({
+  teamId,
+  teamName,
+  isWriter,
+  teamRole,
+  writer,
+  suggesters,
+  locked,
+  onTransferWriter,
+  currentClientSessionId,
+  // Drag drop-related props (student-only)
+  isValidDropTarget = false,
+  isHoveredDropTarget = false,
+  registerDropRef,
+  onClickForCast,
+}) {
   if (!teamId) {
     return (
       <div style={{ padding: "1rem", backgroundColor: "#f0f0f0", borderRadius: "4px", marginBottom: "1rem" }}>
@@ -12,13 +27,37 @@ export function TeamStatus({ teamId, teamName, isWriter, teamRole, writer, sugge
   // Use teamName if available, otherwise fall back to teamId
   const displayName = teamName || teamId.toUpperCase();
 
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (registerDropRef && containerRef.current) {
+      registerDropRef(teamId, containerRef.current);
+    }
+  }, [registerDropRef, teamId]);
+
   return (
-    <div style={{ 
+    <div
+      ref={containerRef}
+      onClick={onClickForCast ? () => onClickForCast(teamId) : undefined}
+      style={{ 
       padding: "1rem", 
-      backgroundColor: isWriter ? "#e3f2fd" : "#f3e5f5", 
+      backgroundColor: isHoveredDropTarget
+        ? "#fff3e0"
+        : isValidDropTarget
+        ? "#e8f5e9"
+        : isWriter
+        ? "#e3f2fd"
+        : "#f3e5f5", 
       borderRadius: "4px", 
       marginBottom: "1rem",
-      border: locked ? "2px solid #4caf50" : "1px solid #ccc"
+      border: isHoveredDropTarget
+        ? "2px solid #ff9800"
+        : isValidDropTarget
+        ? "2px solid #4caf50"
+        : locked
+        ? "2px solid #4caf50"
+        : "1px solid #ccc",
+      cursor: onClickForCast ? "pointer" : "default"
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
         <strong style={{ fontSize: "1.1rem" }}>

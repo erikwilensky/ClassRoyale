@@ -74,6 +74,17 @@ export function EffectsOverlay({ activeEffects, teamId, showAll = false }) {
     overlayStyle.backgroundColor = "rgba(76, 175, 80, 0.1)";
   }
 
+  // For cosmetic cards, add subtle visual feedback
+  if (currentEffect.cardId === "WRITER_SPOTLIGHT" || 
+      currentEffect.cardId === "TEAM_BANNER_COLOR" ||
+      currentEffect.cardId === "VICTORY_FLOURISH" ||
+      currentEffect.cardId === "SIGNATURE_STYLE") {
+    // Cosmetic effects are already styled in getEffectStyles, but ensure they're visible
+    if (!overlayStyle.backgroundColor && currentEffect.cardId !== "VICTORY_FLOURISH") {
+      overlayStyle.backgroundColor = "rgba(255, 255, 255, 0.05)";
+    }
+  }
+
   return <div style={overlayStyle} />;
 }
 
@@ -112,6 +123,35 @@ function getEffectStyles(cardId) {
         opacity: 0.8
       };
 
+    // Cosmetic cards
+    case "WRITER_SPOTLIGHT":
+      return {
+        ...baseStyles,
+        boxShadow: "0 0 40px rgba(255, 255, 0, 0.6) inset",
+        backgroundColor: "rgba(255, 255, 200, 0.1)"
+      };
+
+    case "TEAM_BANNER_COLOR":
+      return {
+        ...baseStyles,
+        filter: "hue-rotate(180deg)",
+        backgroundColor: "rgba(156, 39, 176, 0.1)"
+      };
+
+    case "VICTORY_FLOURISH":
+      return {
+        ...baseStyles,
+        background: "radial-gradient(circle, rgba(255,215,0,0.3) 0%, rgba(255,140,0,0.2) 50%, transparent 100%)",
+        animation: "confetti 1s ease-out"
+      };
+
+    case "SIGNATURE_STYLE":
+      return {
+        ...baseStyles,
+        boxShadow: "0 0 30px rgba(33, 150, 243, 0.4) inset",
+        border: "3px solid rgba(33, 150, 243, 0.6)"
+      };
+
     default:
       return baseStyles;
   }
@@ -139,6 +179,11 @@ if (typeof document !== 'undefined') {
       @keyframes flash {
         0%, 100% { opacity: 0.25; }
         50% { opacity: 0.4; }
+      }
+      @keyframes confetti {
+        0% { transform: scale(0) rotate(0deg); opacity: 1; }
+        50% { transform: scale(1.2) rotate(180deg); opacity: 0.8; }
+        100% { transform: scale(0.8) rotate(360deg); opacity: 0; }
       }
     `;
     document.head.appendChild(styleSheet);

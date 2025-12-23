@@ -11,6 +11,8 @@ import authRoutes from "./routes/auth.js";
 import scoringRoutes, { setQuizRoomInstance } from "./routes/scoring.js";
 import shopRoutes, { setShopQuizRoomInstance, playerRouter } from "./routes/shop.js";
 import matchCardRulesRoutes, { setMatchCardRulesInstance } from "./routes/matchCardRules.js";
+import moderationRoutes, { setModerationInstance } from "./routes/moderation.js";
+import debugRoutes, { setDebugInstance } from "./routes/debug.js";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -48,6 +50,8 @@ app.use("/api", scoringRoutes);
 app.use("/api/shop", shopRoutes);
 app.use("/api/player", playerRouter);
 app.use("/api/match", matchCardRulesRoutes);
+app.use("/api/match/moderation", moderationRoutes);
+app.use("/api/debug", debugRoutes);
 
 // Static files (React app)
 app.use(express.static(path.join(__dirname, "../client")));
@@ -66,12 +70,15 @@ gameServer.define("quiz_room", QuizRoom).on("create", (room) => {
     setQuizRoomInstance(room);
     setShopQuizRoomInstance(room);
     setMatchCardRulesInstance(room);
+    setModerationInstance(room);
+    setDebugInstance(room);
     console.log("✅ QuizRoom instance created and registered for REST API");
 }).on("dispose", (room) => {
     if (room === activeRoomInstance) {
         activeRoomInstance = null;
         setQuizRoomInstance(null);
         setShopQuizRoomInstance(null);
+        setDebugInstance(null);
         console.log("✅ QuizRoom instance disposed");
     }
 });

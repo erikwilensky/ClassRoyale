@@ -3,6 +3,7 @@
 
 import { MATCH_SETTINGS } from "../config/scoring.js";
 import { flushXP } from "../services/xpService.js";
+import { logDebug } from "../utils/log.js";
 
 /**
  * ScoringSystem - Manages scoring, XP, and match win conditions
@@ -49,9 +50,13 @@ export class ScoringSystem {
      * Flush all cached XP to database and notify clients
      */
     flushAllXP() {
+        const playerCount = this.xpCache.size;
+        let totalXPAwarded = 0;
+        
         for (const [playerId, cache] of this.xpCache.entries()) {
             if (cache.totalXP <= 0) continue;
 
+            totalXPAwarded += cache.totalXP;
             const result = flushXP(playerId, cache);
 
             if (result) {
@@ -75,6 +80,8 @@ export class ScoringSystem {
             // Clear cache
             this.xpCache.delete(playerId);
         }
+        
+        logDebug(`[ScoringSystem] XP flush: players=${playerCount}, totalXPAwarded=${totalXPAwarded}`);
     }
 
     /**
@@ -551,4 +558,5 @@ export class ScoringSystem {
         };
     }
 }
+
 

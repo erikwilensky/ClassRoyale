@@ -34,11 +34,13 @@ export function Login() {
             // Save token
             setToken(data.token);
 
-            // Redirect based on role (teachers go to teacher, students go to student)
+            // Redirect based on role:
+            // - Teachers go to teacher lobby
+            // - Students go to student lobby (from there they join a match, then go to /student)
             if (data.player.isTeacher) {
-                navigate("/teacher");
+                navigate("/teacher/lobby");
             } else {
-                navigate("/student");
+                navigate("/lobby");
             }
         } catch (error) {
             console.error("Login error:", error);

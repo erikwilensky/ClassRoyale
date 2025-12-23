@@ -56,6 +56,17 @@ export function runMigrations() {
         }
     }
 
+    // Chapter 11: Create teacher_card_settings table for default card configurations
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS teacher_card_settings (
+            teacherId TEXT PRIMARY KEY,
+            disabledCards TEXT, -- JSON array of card IDs
+            goldCostModifiers TEXT, -- JSON object mapping cardId to multiplier
+            updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (teacherId) REFERENCES players(id) ON DELETE CASCADE
+        )
+    `);
+
     console.log("✅ Database migrations completed");
 }
 

@@ -131,10 +131,16 @@ router.get("/score/match", authenticateToken, (req, res) => {
       });
     }
 
-    // Convert Maps to plain objects for JSON
+    // Convert Maps to plain objects for JSON, including team names
     const teamsObj = {};
     for (const [teamId, roundPoints] of scores.teams.entries()) {
-      teamsObj[teamId] = roundPoints;
+      // Get team name from room state
+      const team = quizRoomInstance.state?.teams?.get(teamId);
+      const teamName = team?.name || teamId;
+      teamsObj[teamId] = {
+        roundPoints,
+        name: teamName
+      };
     }
 
     const perPlayerObj = {};

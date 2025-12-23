@@ -42,6 +42,12 @@ export function TeacherScoreboard() {
     }
   };
 
+  const handleSubmitScores = async (roundNumber) => {
+    // This function is here to prevent errors, but scoring should be done from the Teacher page
+    // where ROUND_DATA messages are received via WebSocket
+    alert("Please submit scores from the Teacher page where round data is available.");
+  };
+
   const handleOverride = async (teamId, round, newScore) => {
     if (newScore < 0 || newScore > 10) {
       setError("Score must be between 0 and 10");
@@ -142,10 +148,12 @@ export function TeacherScoreboard() {
               <div style={{ marginBottom: "1rem" }}>
                 {Object.entries(roundData.answers || {}).map(([teamId, answerData]) => {
                   const inputKey = `${roundData.roundNumber}-${teamId}`;
+                  const teamData = scores?.teams?.[teamId];
+                  const teamName = typeof teamData === 'object' ? (teamData.name || teamId) : teamId;
                   return (
                     <div key={teamId} style={{ marginBottom: "1rem", padding: "0.75rem", backgroundColor: "white", borderRadius: "4px", border: "1px solid #ddd" }}>
                       <div style={{ marginBottom: "0.5rem" }}>
-                        <strong>{teamId}:</strong> {answerData.text || "(No answer)"}
+                        <strong>{teamName}:</strong> {answerData.text || "(No answer)"}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                         <label>Score (0-10):</label>
@@ -196,10 +204,12 @@ export function TeacherScoreboard() {
             </thead>
             <tbody>
               {teamIds.map(teamId => {
-                const roundPoints = scores.teams[teamId] || 0;
+                const teamData = scores.teams[teamId];
+                const roundPoints = typeof teamData === 'object' ? teamData.roundPoints : (teamData || 0);
+                const teamName = typeof teamData === 'object' ? (teamData.name || teamId) : teamId;
                 return (
                   <tr key={teamId}>
-                    <td style={{ padding: "0.75rem", border: "1px solid #ddd", fontWeight: "bold" }}>{teamId}</td>
+                    <td style={{ padding: "0.75rem", border: "1px solid #ddd", fontWeight: "bold" }}>{teamName}</td>
                     <td style={{ padding: "0.75rem", border: "1px solid #ddd", textAlign: "center", fontWeight: "bold" }}>{roundPoints}</td>
                     {Array.from({ length: rounds }, (_, i) => {
                       const round = i + 1;
