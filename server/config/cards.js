@@ -180,3 +180,6 @@ export function getCardUnlockCost(cardId) {
     const card = CARDS[cardId];
     return card ? card.unlockCost : null;
 }
+
+// Card Catalog v1 - Re-export for client/shop consumption
+export { CARD_CATALOG_V1, CARD_CATALOG_V1_BY_ID } from './cards.catalog.v1.js';

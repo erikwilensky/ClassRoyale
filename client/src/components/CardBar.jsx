@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { getToken } from "../utils/auth.js";
 import { getEffectiveGoldCost } from "../ui/drag/dragRules.js";
+import { Card } from "./Card.jsx";
 
 // Chapter 10/14/15: CardBar fetches cards and supports drag / tap-to-select casting
 // Chapter 16: Supports cardFilterIds to show only deck cards in-match
@@ -92,7 +93,25 @@ export function CardBar({
   };
 
   const isCardUnlocked = (cardId) => {
-    return unlockedCards.includes(cardId);
+    // If cardFilterIds is provided (match started), cards in deck are considered "unlocked" for casting
+    if (cardFilterIds && Array.isArray(cardFilterIds) && cardFilterIds.includes(cardId)) {
+      return true;
+    }
+    // Check direct match
+    if (unlockedCards.includes(cardId)) {
+      return true;
+    }
+    // Check if unlockedCards has legacy version (UPPER_CASE) and cardId is catalog (kebab-case)
+    const legacyId = cardId.toUpperCase().replace(/-/g, '_');
+    if (unlockedCards.includes(legacyId)) {
+      return true;
+    }
+    // Check if unlockedCards has catalog version (kebab-case) and cardId is legacy (UPPER_CASE)
+    const catalogId = cardId.toLowerCase().replace(/_/g, '-');
+    if (unlockedCards.includes(catalogId)) {
+      return true;
+    }
+    return false;
   };
 
   const isCardDisabled = (card) => {
@@ -192,101 +211,39 @@ export function CardBar({
       {standardCards.length > 0 && (
         <div style={{ marginBottom: "1rem" }}>
           <h4 style={{ fontSize: "0.9rem", marginBottom: "0.5rem", color: "#666" }}>Standard Cards</h4>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+          <div style={{ display: "flex", flexWrap: "nowrap", gap: "0.5rem", overflowX: "auto", overflowY: "hidden" }}>
             {/* Unlocked standard cards */}
             {unlockedStandardCards.map((card) => {
               const cardDisabled = isCardDisabled(card);
               const effectiveCost = getEffectiveGoldCost({ card, goldCostModifiers });
               const canAfford = gold >= effectiveCost;
               const isSelected = selectedCardId === card.id;
+              const multiplier = goldCostModifiers[card.id] || 1.0;
               
               return (
-                <button
+                <Card
                   key={card.id}
+                  card={card}
+                  isUnlocked={true}
+                  isDisabled={cardDisabled}
+                  effectiveCost={effectiveCost}
+                  goldCostModifier={multiplier !== 1.0 ? multiplier : null}
                   onClick={(e) => handleCardClick(card.id, e)}
                   onPointerDown={onCardPointerDown ? (e) => onCardPointerDown(card, e) : undefined}
-                  disabled={cardDisabled}
-                  style={{
-                    padding: "0.75rem 1rem",
-                    backgroundColor: cardDisabled
-                      ? "#ccc"
-                      : isSelected
-                      ? "#1976d2"
-                      : card.target === "self"
-                      ? "#4caf50"
-                      : "#f44336",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: cardDisabled ? "not-allowed" : "pointer",
-                    fontWeight: "bold",
-                    fontSize: "0.9rem",
-                    opacity: cardDisabled ? 0.6 : 1,
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    minWidth: "120px",
-                    position: "relative"
-                  }}
-                  title={
-                    disabledCards && disabledCards.has(card.id)
-                      ? "Disabled this match by teacher"
-                      : cardDisabled
-                      ? !roundActive
-                        ? "Round not active"
-                        : !canAfford
-                        ? `Need ${effectiveCost} gold, have ${gold}`
-                        : "Cannot cast"
-                      : `Cast ${card.name} (${getDisplayCost(card)})`
-                  }
-                >
-                  <span>{card.name}</span>
-                  <span style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    {getDisplayCost(card)} {card.target === "self" ? "(Self)" : "(Opponent)"}
-                  </span>
-                </button>
+                  isSelected={isSelected}
+                />
               );
             })}
             {/* Locked standard cards */}
             {lockedStandardCards.map((card) => {
               return (
-                <button
+                <Card
                   key={card.id}
-                  disabled={true}
-                  style={{
-                    padding: "0.75rem 1rem",
-                    backgroundColor: "#999",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: "not-allowed",
-                    fontWeight: "bold",
-                    fontSize: "0.9rem",
-                    opacity: 0.5,
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    minWidth: "120px",
-                    position: "relative"
-                  }}
-                  title={`Unlock for ${card.unlockCost} XP in Shop`}
-                >
-                  <span style={{ position: "relative" }}>
-                    {card.name}
-                    <span style={{ 
-                      position: "absolute", 
-                      top: "-8px", 
-                      right: "-8px", 
-                      fontSize: "0.7rem" 
-                    }}>🔒</span>
-                  </span>
-                  <span style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    {card.cost}💰 {card.target === "self" ? "(Self)" : "(Opponent)"}
-                  </span>
-                  <span style={{ fontSize: "0.65rem", marginTop: "0.25rem", opacity: 0.8 }}>
-                    {card.unlockCost} XP
-                  </span>
-                </button>
+                  card={card}
+                  isUnlocked={false}
+                  isDisabled={true}
+                  effectiveCost={card.baseGoldCost || card.cost || 0}
+                />
               );
             })}
           </div>
@@ -297,45 +254,21 @@ export function CardBar({
       {cosmeticCards.length > 0 && unlockedCosmeticCards.length > 0 && (
         <div style={{ marginBottom: "1rem" }}>
           <h4 style={{ fontSize: "0.9rem", marginBottom: "0.5rem", color: "#666" }}>✨ Cosmetic Cards</h4>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+          <div style={{ display: "flex", flexWrap: "nowrap", gap: "0.5rem", overflowX: "auto", overflowY: "hidden" }}>
             {unlockedCosmeticCards.map((card) => {
               // Check if card is disabled (match-level disable or round not active)
               const cardDisabled = isCardDisabled(card);
               const isMatchDisabled = disabledCards && disabledCards.has(card.id);
               
               return (
-                <button
+                <Card
                   key={card.id}
+                  card={card}
+                  isUnlocked={true}
+                  isDisabled={cardDisabled}
+                  effectiveCost={0}
                   onClick={(e) => handleCardClick(card.id, e)}
-                  disabled={cardDisabled}
-                  style={{
-                    padding: "0.75rem 1rem",
-                    backgroundColor: cardDisabled ? "#ccc" : "#9c27b0",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: cardDisabled ? "not-allowed" : "pointer",
-                    fontWeight: "bold",
-                    fontSize: "0.9rem",
-                    opacity: cardDisabled ? 0.6 : 1,
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    minWidth: "120px"
-                  }}
-                  title={
-                    isMatchDisabled
-                      ? "Disabled this match by teacher"
-                      : cardDisabled
-                      ? "Round not active"
-                      : `Use ${card.name} (Free)`
-                  }
-                >
-                  <span>✨ {card.name}</span>
-                  <span style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Free
-                  </span>
-                </button>
+                />
               );
             })}
           </div>

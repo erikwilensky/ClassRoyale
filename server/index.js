@@ -55,6 +55,8 @@ app.use("/api/debug", debugRoutes);
 
 // Static files (React app)
 app.use(express.static(path.join(__dirname, "../client")));
+// Serve card art images
+app.use("/card_art", express.static(path.join(__dirname, "../card_art")));
 
 // Colyseus game server
 const gameServer = new Server({

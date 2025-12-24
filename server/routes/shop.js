@@ -2,6 +2,7 @@ import express from "express";
 import { authenticateToken } from "../middleware/auth.js";
 import { spendXP, getPlayerProgress } from "../services/xpService.js";
 import { getAllCards, getCardById } from "../config/cards.js";
+import { CARD_CATALOG_V1, CARD_CATALOG_V1_BY_ID, getLegacyIdFromCatalogId } from "../config/cards.catalog.v1.js";
 import { getPlayerUnlockedCards } from "../services/xpService.js";
 import { db } from "../db/database.js";
 
@@ -18,28 +19,70 @@ export function setShopQuizRoomInstance(room) {
 /**
  * GET /api/shop/cards
  * Returns all cards with unlock status for authenticated user
+ * Card Catalog v1: Returns cards from catalog (50 cards) with backwards compatibility
  */
 router.get("/cards", authenticateToken, (req, res) => {
     try {
         const playerId = req.playerId;
         
-        // Get player's unlocked cards
+        // Get player's unlocked cards (may contain both legacy and catalog IDs)
         const unlockedCards = getPlayerUnlockedCards(playerId);
         const unlockedSet = new Set(unlockedCards);
         
-        // Get all cards and add unlock status
-        const allCards = getAllCards();
-        const cardsWithStatus = allCards.map(card => ({
-            id: card.id,
-            name: card.name,
-            unlockCost: card.unlockCost,
-            type: card.type,
-            cost: card.cost, // Gold cost in-match
-            target: card.target,
-            effect: card.effect,
-            description: card.description,
-            unlocked: unlockedSet.has(card.id)
-        }));
+        // Card Catalog v1: Use catalog cards, but check unlock status for both catalog and legacy IDs
+        const cardsWithStatus = CARD_CATALOG_V1.map(card => {
+            // Check if unlocked by catalog ID or legacy ID
+            const legacyId = getLegacyIdFromCatalogId(card.id);
+            const isUnlocked = unlockedSet.has(card.id) || (legacyId && unlockedSet.has(legacyId));
+            
+            // Format effect for display (catalog has effect object, legacy has string)
+            let effectDisplay = card.effect;
+            if (card.effect && typeof card.effect === 'object') {
+                // Convert effect object to readable string
+                const effectType = card.effect.type || '';
+                const params = card.effect.params || card.effect;
+                if (effectType === 'TIMER_ADD' && params.seconds) {
+                    effectDisplay = `Add ${params.seconds} seconds to timer`;
+                } else if (effectType === 'TIMER_SUBTRACT' && params.seconds) {
+                    effectDisplay = `Subtract ${params.seconds} seconds from timer`;
+                } else if (effectType === 'SUGGESTION_MUTE_RECEIVE' && params.durationSeconds) {
+                    effectDisplay = `Block suggestions for ${params.durationSeconds} seconds`;
+                } else if (effectType === 'SUGGESTION_DELAY' && params.delaySeconds) {
+                    effectDisplay = `Delay suggestions by ${params.delaySeconds} seconds`;
+                } else if (effectType === 'GOLD_GAIN' && params.amount) {
+                    effectDisplay = `Gain ${params.amount} gold`;
+                } else if (effectType === 'SHIELD_NEGATIVE_NEXT') {
+                    effectDisplay = 'Block next negative card';
+                } else if (effectType === 'WRITER_SWAP') {
+                    effectDisplay = 'Swap writer with suggester';
+                } else if (effectType === 'SCREEN_SHAKE' || effectType === 'SCREEN_BLUR' || effectType === 'SCREEN_DISTORT') {
+                    effectDisplay = card.description; // Use description for screen effects
+                } else if (effectType === 'COSMETIC') {
+                    effectDisplay = card.description; // Use description for cosmetic
+                } else if (effectType === 'MULTI') {
+                    effectDisplay = 'Multiple effects';
+                } else {
+                    effectDisplay = card.description; // Fallback to description
+                }
+            }
+            
+            return {
+                id: card.id,
+                name: card.name,
+                unlockCost: card.unlockXp, // Catalog uses unlockXp
+                type: card.kind, // Catalog uses "kind" instead of "type"
+                cost: card.baseGoldCost, // Catalog uses baseGoldCost
+                target: card.target,
+                effect: effectDisplay, // Formatted for display
+                description: card.description,
+                category: card.category,
+                unlocked: isUnlocked,
+                // Card Catalog v1: Include metadata and full effect object for advanced use
+                meta: card.meta,
+                limits: card.limits,
+                effectData: card.effect // Full effect object for advanced clients
+            };
+        });
         
         res.json({ cards: cardsWithStatus });
     } catch (error) {
@@ -62,15 +105,38 @@ router.post("/purchase", authenticateToken, async (req, res) => {
             return res.status(400).json({ error: "cardId is required" });
         }
         
-        // Get card info
-        const card = getCardById(cardId);
+        // Card Catalog v1: Check both catalog and legacy cards
+        let card = CARD_CATALOG_V1_BY_ID[cardId]; // Try catalog first
+        let legacyId = null;
+        
+        if (!card) {
+            // Try legacy cards
+            const legacyCard = getCardById(cardId);
+            if (legacyCard) {
+                // Convert legacy card to catalog format for consistency
+                card = {
+                    id: legacyCard.id,
+                    name: legacyCard.name,
+                    unlockXp: legacyCard.unlockCost,
+                    kind: legacyCard.type,
+                    baseGoldCost: legacyCard.cost,
+                    target: legacyCard.target,
+                    effect: legacyCard.effect,
+                    description: legacyCard.description
+                };
+            }
+        } else {
+            // If catalog card, also check legacy ID for unlock status
+            legacyId = getLegacyIdFromCatalogId(cardId);
+        }
+        
         if (!card) {
             return res.status(400).json({ error: "Invalid card ID" });
         }
         
-        // Check if player already owns the card
+        // Check if player already owns the card (check both catalog and legacy IDs)
         const unlockedCards = getPlayerUnlockedCards(playerId);
-        if (unlockedCards.includes(cardId)) {
+        if (unlockedCards.includes(cardId) || (legacyId && unlockedCards.includes(legacyId))) {
             return res.status(400).json({ error: "Card already owned" });
         }
         
@@ -95,26 +161,44 @@ router.post("/purchase", authenticateToken, async (req, res) => {
             return res.status(404).json({ error: "Player not found" });
         }
         
-        if (playerProgress.availableXP < card.unlockCost) {
+        // Card Catalog v1: Use unlockXp from catalog, fall back to unlockCost for legacy
+        const unlockCost = card.unlockXp || card.unlockCost;
+        
+        if (playerProgress.availableXP < unlockCost) {
             return res.status(400).json({ 
                 error: "Insufficient XP",
-                required: card.unlockCost,
+                required: unlockCost,
                 available: playerProgress.availableXP
             });
         }
         
         // Atomic operation: spend XP and create unlock record
         // Use database transaction for atomicity
-        const spendResult = spendXP(playerId, card.unlockCost);
+        const spendResult = spendXP(playerId, unlockCost);
         if (!spendResult.success) {
             return res.status(400).json({ error: spendResult.error });
         }
         
         // Create unlock record
+        // Card Catalog v1: Store catalog ID, but also create legacy unlock if needed for backwards compatibility
         try {
             db.prepare(
                 "INSERT INTO unlocks (playerId, cardId, unlockMethod) VALUES (?, ?, 'purchase')"
             ).run(playerId, cardId);
+            
+            // If this is a catalog card with a legacy ID, also unlock the legacy version for backwards compatibility
+            if (legacyId && !unlockedCards.includes(legacyId)) {
+                try {
+                    db.prepare(
+                        "INSERT INTO unlocks (playerId, cardId, unlockMethod) VALUES (?, ?, 'purchase')"
+                    ).run(playerId, legacyId);
+                } catch (legacyError) {
+                    // Ignore if legacy unlock already exists
+                    if (!legacyError.message.includes("UNIQUE")) {
+                        console.warn(`[Shop] Failed to create legacy unlock for ${legacyId}:`, legacyError);
+                    }
+                }
+            }
         } catch (error) {
             // If insert fails (e.g., duplicate), refund XP
             // This shouldn't happen due to earlier check, but handle it anyway
@@ -122,17 +206,17 @@ router.post("/purchase", authenticateToken, async (req, res) => {
                 // Refund XP by adding it back to availableXP
                 const currentAvailableXP = db.prepare("SELECT availableXP FROM players WHERE id = ?").get(playerId)?.availableXP || 0;
                 db.prepare("UPDATE players SET availableXP = ? WHERE id = ?")
-                    .run(currentAvailableXP + card.unlockCost, playerId);
+                    .run(currentAvailableXP + unlockCost, playerId);
                 return res.status(400).json({ error: "Card already owned" });
             }
             // For other errors, also refund XP
             const currentAvailableXP = db.prepare("SELECT availableXP FROM players WHERE id = ?").get(playerId)?.availableXP || 0;
             db.prepare("UPDATE players SET availableXP = ? WHERE id = ?")
-                .run(currentAvailableXP + card.unlockCost, playerId);
+                .run(currentAvailableXP + unlockCost, playerId);
             throw error;
         }
         
-        console.log(`[Shop] Player ${playerId} purchased card ${cardId} for ${card.unlockCost} XP`);
+        console.log(`[Shop] Player ${playerId} purchased card ${cardId} for ${unlockCost} XP`);
         
         res.json({
             success: true,
@@ -140,7 +224,7 @@ router.post("/purchase", authenticateToken, async (req, res) => {
             unlockedCard: {
                 id: card.id,
                 name: card.name,
-                type: card.type
+                type: card.kind || card.type
             }
         });
     } catch (error) {

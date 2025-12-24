@@ -57,6 +57,11 @@ export class MockRoom {
     this.broadcast("TEAM_UPDATE", {});
   }
 
+  broadcastToTeam(teamId, type, message) {
+    // Mock implementation - just broadcast
+    this.broadcast(type, message);
+  }
+
   send(client, type, message) {
     // Mock implementation for sending to specific client
     if (client && client.receiveMessage) {

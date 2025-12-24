@@ -796,7 +796,22 @@ export function Student() {
   };
 
   // Chapter 16: Determine if match has started (Round 1 active) and get deck filter
-  const matchStarted = state.round?.roundNumber >= 1 && roundState === "ROUND_ACTIVE";
+  // Use deckLocked from server state as the source of truth - server sets it when match starts
+  const roundNumber = state.round?.roundNumber || 0;
+  const serverDeckLocked = state.teams?.[teamId]?.deckLocked || false;
+  
+  // Debug: Log deck locked state
+  if (teamId) {
+    console.log('[Student] Deck state:', { 
+      teamId, 
+      serverDeckLocked, 
+      roundNumber, 
+      deckLockedFromState: state.teams?.[teamId]?.deckLocked,
+      teamData: state.teams?.[teamId] 
+    });
+  }
+  // Match started when roundNumber >= 1 (for filtering hand cards to deck only)
+  const matchStarted = roundNumber >= 1;
   const teamDeckSlots = teamId && state.teams?.[teamId]?.deckSlots 
     ? state.teams[teamId].deckSlots 
     : [null, null, null, null];
@@ -901,16 +916,24 @@ export function Student() {
         hasTeam={!!teamId}
         arenaProps={arenaProps}
         answerProps={answerProps}
-        handProps={handProps}
+        handProps={handProps} // Always show hand - filtered to deck cards during match, all cards before match
         teamSelectionContent={teamSelectionContent}
-        deckBuilderProps={teamId ? {
-          teamId,
-          deckSlots: teamDeckSlots,
-          teamCardPool: state.teams?.[teamId]?.teamCardPool || [],
-          deckLocked: state.teams?.[teamId]?.deckLocked || false,
-          matchStarted,
-          room,
-        } : null}
+        deckBuilderProps={teamId && !serverDeckLocked && roundNumber === 0 ? (() => {
+          // Only show deck builder when deck is NOT locked AND round hasn't started
+          const props = {
+            teamId,
+            deckSlots: teamDeckSlots,
+            teamCardPool: state.teams?.[teamId]?.teamCardPool || [],
+            deckLocked: serverDeckLocked, // Use server's deckLocked flag
+            matchStarted: false, // Don't use matchStarted to lock deck - only use deckLocked
+            room,
+          };
+          // Only log if there's an issue
+          if (props.deckLocked && props.teamCardPool.length === 0) {
+            console.warn('[Student] DeckBuilder: deckLocked but no cards in pool');
+          }
+          return props;
+        })() : null}
       />
 
       {teamId && <EffectsOverlay activeEffects={activeEffects} teamId={teamId} />}

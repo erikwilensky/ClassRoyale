@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { getToken } from "../../utils/auth.js";
+import { Card } from "../../components/Card.jsx";
 
 /**
  * Chapter 16: Pre-match team deck builder.
@@ -17,6 +18,19 @@ export function DeckBuilder({
   const [poolCards, setPoolCards] = useState([]);
   const [allCards, setAllCards] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // Debug logging (only log when state changes significantly)
+  useEffect(() => {
+    if (teamCardPool.length > 0 && poolCards.length === 0 && allCards.length > 0) {
+      console.warn('[DeckBuilder] Card mapping issue:', { 
+        teamCardPoolLength: teamCardPool.length, 
+        allCardsCount: allCards.length,
+        poolCardsCount: poolCards.length,
+        teamCardPoolSample: teamCardPool.slice(0, 3),
+        allCardsSample: allCards.slice(0, 3).map(c => c.id)
+      });
+    }
+  }, [teamCardPool.length, poolCards.length, allCards.length]);
 
   // Fetch all cards (same as CardBar)
   useEffect(() => {
@@ -47,11 +61,44 @@ export function DeckBuilder({
   }, []);
 
   // Map teamCardPool IDs to full card objects
+  // Handles both catalog IDs (kebab-case) and legacy IDs (UPPER_CASE)
+  // Deduplicates cards that appear in both legacy and catalog formats
   useEffect(() => {
     if (allCards.length > 0 && teamCardPool.length > 0) {
+      const seenCardIds = new Set();
       const mapped = teamCardPool
-        .map(cardId => allCards.find(c => c.id === cardId))
+        .map(cardId => {
+          // Try direct match first (catalog ID)
+          let card = allCards.find(c => c.id === cardId);
+          
+          // If no match, try converting legacy ID to catalog ID
+          if (!card && cardId) {
+            // Convert UPPER_CASE to kebab-case (e.g., "TIME_FREEZE" -> "time-freeze")
+            const catalogId = cardId.toLowerCase().replace(/_/g, '-');
+            card = allCards.find(c => c.id === catalogId);
+          }
+          
+          // If still no match, try reverse (catalog to legacy)
+          if (!card && cardId) {
+            const legacyId = cardId.toUpperCase().replace(/-/g, '_');
+            card = allCards.find(c => {
+              const cardLegacyId = c.id.toUpperCase().replace(/-/g, '_');
+              return cardLegacyId === legacyId;
+            });
+          }
+          
+          return card;
+        })
         .filter(Boolean)
+        .filter(card => {
+          // Deduplicate: only keep the first occurrence of each card (by catalog ID)
+          const cardId = card.id.toLowerCase().replace(/_/g, '-');
+          if (seenCardIds.has(cardId)) {
+            return false; // Skip duplicate
+          }
+          seenCardIds.add(cardId);
+          return true;
+        })
         .sort((a, b) => {
           // Sort: standard first, then cosmetic; then by name
           if (a.type !== b.type) {
@@ -60,14 +107,42 @@ export function DeckBuilder({
           return a.name.localeCompare(b.name);
         });
       setPoolCards(mapped);
+      // Debug: Check which cards weren't mapped
+      const unmappedIds = teamCardPool.filter(cardId => {
+        const normalizedId = cardId.toLowerCase().replace(/_/g, '-');
+        return !mapped.some(c => {
+          const cardNormalized = c.id.toLowerCase().replace(/_/g, '-');
+          return cardNormalized === normalizedId;
+        });
+      });
+      
+      const cosmeticCards = mapped.filter(c => c.type === 'cosmetic');
+      const standardCards = mapped.filter(c => c.type === 'standard');
+      
+      console.log('[DeckBuilder] Mapped cards:', { 
+        teamCardPoolCount: teamCardPool.length, 
+        mappedCount: mapped.length,
+        standardCount: standardCards.length,
+        cosmeticCount: cosmeticCards.length,
+        teamCardPool: teamCardPool,
+        mappedIds: mapped.map(c => c.id),
+        cosmeticIds: cosmeticCards.map(c => c.id),
+        unmappedIds: unmappedIds,
+        allCardsCount: allCards.length,
+        allCardsSample: allCards.slice(0, 5).map(c => ({ id: c.id, name: c.name, type: c.type }))
+      });
     } else {
       setPoolCards([]);
     }
   }, [allCards, teamCardPool]);
 
   const handleSlotClick = (slotIndex) => {
-    if (deckLocked || matchStarted) return;
-    if (!room) return;
+    if (deckLocked) {
+      return; // Only check deckLocked, not matchStarted
+    }
+    if (!room) {
+      return;
+    }
 
     // If a pool card is selected, assign it to this slot
     if (selectedPoolCardId) {
@@ -88,7 +163,9 @@ export function DeckBuilder({
   };
 
   const handlePoolCardClick = (cardId) => {
-    if (deckLocked || matchStarted) return;
+    if (deckLocked) {
+      return; // Only check deckLocked, not matchStarted
+    }
     // Toggle selection
     setSelectedPoolCardId(selectedPoolCardId === cardId ? null : cardId);
   };
@@ -108,8 +185,13 @@ export function DeckBuilder({
     );
   }
 
-  if (matchStarted || deckLocked) {
-    // Show locked deck view
+  // Only log when there's a potential issue
+  if (deckLocked && poolCards.length > 0) {
+    console.log('[DeckBuilder] Deck is locked but cards are available');
+  }
+
+  if (deckLocked) {
+    // Show locked deck view (only check deckLocked from server)
     return (
       <section className="clash-deck-builder clash-panel">
         <h3 className="clash-deck-title">Team Deck (Locked)</h3>
@@ -154,8 +236,21 @@ export function DeckBuilder({
               <div className="clash-deck-slot-label">Slot {slotIndex + 1}</div>
               {card ? (
                 <div className="clash-deck-slot-card">
-                  <div className="clash-deck-slot-card-name">{card.name}</div>
-                  <div className="clash-deck-slot-card-type">{card.type}</div>
+                  <Card
+                    card={{
+                      id: card.id,
+                      name: card.name,
+                      category: card.category || 'cosmetic',
+                      baseGoldCost: card.cost || 0,
+                      unlockXp: card.unlockCost || 0,
+                      kind: card.type || 'standard',
+                      target: card.target || 'self',
+                    }}
+                    isUnlocked={true}
+                    isDisabled={false}
+                    isSelected={false}
+                    className="clash-deck-slot-card-inner"
+                  />
                   <button
                     className="clash-deck-slot-clear"
                     onClick={(e) => {
@@ -185,15 +280,59 @@ export function DeckBuilder({
             {poolCards.map(card => {
               const isSelected = selectedPoolCardId === card.id;
               const isInDeck = deckSlots.includes(card.id);
+              // Map shop API format to Card component format
+              const cardData = {
+                id: card.id,
+                name: card.name,
+                category: card.category || 'cosmetic',
+                baseGoldCost: card.cost || 0,
+                unlockXp: card.unlockCost || 0,
+                kind: card.type || 'standard',
+                target: card.target || 'self',
+              };
               return (
                 <div
                   key={card.id}
-                  className={`clash-deck-pool-card ${isSelected ? "clash-deck-pool-card--selected" : ""} ${isInDeck ? "clash-deck-pool-card--in-deck" : ""}`}
-                  onClick={() => handlePoolCardClick(card.id)}
+                  className={`clash-deck-pool-card-wrapper ${isSelected ? "clash-deck-pool-card--selected" : ""} ${isInDeck ? "clash-deck-pool-card--in-deck" : ""}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!deckLocked && !isInDeck) {
+                      console.log('[DeckBuilder] Clicking card:', card.id, card.name, 'type:', card.type, 'category:', card.category);
+                      handlePoolCardClick(card.id);
+                    } else {
+                      console.log('[DeckBuilder] Card click blocked:', { deckLocked, isInDeck, cardId: card.id });
+                    }
+                  }}
+                  style={{ 
+                    cursor: deckLocked || isInDeck ? 'not-allowed' : 'pointer'
+                  }}
                 >
-                  <div className="clash-deck-pool-card-name">{card.name}</div>
-                  <div className="clash-deck-pool-card-type">{card.type}</div>
-                  {isInDeck && <div className="clash-deck-pool-card-badge">In Deck</div>}
+                  <Card
+                    card={cardData}
+                    isUnlocked={card.unlocked !== false}
+                    isDisabled={deckLocked || isInDeck}
+                    isSelected={isSelected}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!deckLocked && !isInDeck) {
+                        handlePoolCardClick(card.id);
+                      }
+                    }}
+                  />
+                  {isInDeck && (
+                    <div className="clash-deck-pool-card-badge" style={{
+                      position: 'absolute',
+                      top: '4px',
+                      right: '4px',
+                      background: 'var(--clash-accent)',
+                      color: '#0b1630',
+                      fontSize: '0.65rem',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      fontWeight: 'bold',
+                      zIndex: 10
+                    }}>In Deck</div>
+                  )}
                 </div>
               );
             })}

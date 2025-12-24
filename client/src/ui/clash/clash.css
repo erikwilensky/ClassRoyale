@@ -20,7 +20,7 @@
 
   /* Chapter 17.1: Stable layout contract - fixed heights for grid rows */
   --clash-hud-height: 72px;
-  --clash-hand-height: 140px;
+  --clash-hand-height: 220px; /* Increased to fit card height (200px) + padding */
 }
 
 /* Chapter 17.1: Stable layout contract using CSS Grid
@@ -166,6 +166,8 @@
   align-items: stretch;
   justify-content: space-between;
   margin-bottom: var(--clash-space-md);
+  position: relative;
+  z-index: 0;
 }
 
 .clash-arena-row {
@@ -195,6 +197,7 @@
   background: linear-gradient(180deg, rgba(21, 31, 60, 0.95), rgba(9, 14, 32, 0.98));
   box-shadow: var(--clash-shadow-soft);
   position: relative;
+  z-index: 0;
   cursor: default;
   transition: transform 0.12s ease-out, box-shadow 0.12s ease-out, border-color 0.12s ease-out;
   border: 2px solid rgba(255, 255, 255, 0.06);
@@ -495,12 +498,14 @@
 /* Chapter 17.1: Hand fixed to bottom grid row, no internal vertical scroll */
 .clash-hand {
   height: var(--clash-hand-height);
-  overflow: hidden;
+  overflow: visible;
   padding: var(--clash-space-sm) var(--clash-space-md);
   background: linear-gradient(180deg, rgba(9, 12, 28, 0.98), rgba(2, 4, 12, 0.98));
   box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.7);
   z-index: 30;
   box-sizing: border-box;
+  display: flex;
+  align-items: center;
 }
 
 .clash-btn {
@@ -538,9 +543,33 @@
   padding: 0.5rem 0 !important;
   background: transparent !important;
   border: none !important;
+  width: 100%;
   height: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
+  display: flex;
+  align-items: center;
+  /* Ensure scrollbar is visible */
+  scrollbar-width: thin;
+  scrollbar-color: var(--clash-accent) rgba(15, 25, 50, 0.8);
+}
+
+.clash-hand .clash-cardbar::-webkit-scrollbar {
+  height: 8px;
+}
+
+.clash-hand .clash-cardbar::-webkit-scrollbar-track {
+  background: rgba(15, 25, 50, 0.4);
+  border-radius: 4px;
+}
+
+.clash-hand .clash-cardbar::-webkit-scrollbar-thumb {
+  background: var(--clash-accent);
+  border-radius: 4px;
+}
+
+.clash-hand .clash-cardbar::-webkit-scrollbar-thumb:hover {
+  background: #ffc107;
 }
 
 .clash-hand .clash-card {
@@ -569,6 +598,16 @@
 /* Chapter 16: Deck Builder Styles */
 .clash-deck-builder {
   margin-bottom: var(--clash-space-lg);
+  padding: var(--clash-space-md);
+  background: rgba(15, 25, 50, 0.4);
+  border-radius: var(--clash-radius-md);
+  width: 100%;
+  box-sizing: border-box;
+  /* Ensure content can expand and scroll */
+  min-height: 0;
+  overflow: visible;
+  position: relative;
+  z-index: 2;
 }
 
 .clash-deck-title {
@@ -588,6 +627,8 @@
   grid-template-columns: repeat(4, 1fr);
   gap: var(--clash-space-md);
   margin-bottom: var(--clash-space-lg);
+  width: 100%;
+  min-width: 0; /* Prevent grid overflow */
 }
 
 .clash-deck-slot {
@@ -645,6 +686,15 @@
 .clash-deck-slot-card {
   text-align: center;
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--clash-space-xs);
+}
+
+.clash-deck-slot-card-inner {
+  transform: scale(0.6);
+  transform-origin: top center;
 }
 
 .clash-deck-slot-card-name {
@@ -678,6 +728,13 @@
 
 .clash-deck-pool {
   margin-top: var(--clash-space-lg);
+  max-height: 400px;
+  overflow-y: auto !important;
+  overflow-x: hidden;
+  padding-right: var(--clash-space-xs); /* Add padding for scrollbar */
+  /* Ensure scrollbar is visible */
+  scrollbar-width: thin;
+  scrollbar-color: var(--clash-accent) rgba(15, 25, 50, 0.8);
 }
 
 .clash-deck-pool-title {
@@ -697,6 +754,28 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: var(--clash-space-md);
+  position: relative;
+  z-index: 1;
+}
+
+.clash-deck-pool-card-wrapper {
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.clash-deck-pool-card-wrapper:hover {
+  transform: translateY(-2px);
+}
+
+.clash-deck-pool-card-wrapper.clash-deck-pool-card--selected {
+  outline: 3px solid var(--clash-success);
+  outline-offset: 4px;
+  border-radius: 12px;
+}
+
+.clash-deck-pool-card-wrapper.clash-deck-pool-card--in-deck {
+  opacity: 0.7;
 }
 
 .clash-deck-pool-card {

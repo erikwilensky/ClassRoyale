@@ -141,10 +141,12 @@ describe('CardSystem', () => {
         suggesters: [],
         gold: 5,
         answer: "",
-        locked: false
+        locked: false,
+        deckSlots: ['SHAKE', 'BLUR', null, null] // Add cards to deck
       };
       mockRoom.state.teams.set('A', team);
       mockRoom.state.gold.set('A', 5);
+      mockRoom.clients.push(client);
     });
 
     it('should reject cast from non-student', () => {
@@ -193,7 +195,8 @@ describe('CardSystem', () => {
         suggesters: [],
         gold: 5,
         answer: "",
-        locked: false
+        locked: false,
+        deckSlots: ['SHAKE', null, null, null] // Card in deck but not unlocked
       };
       mockRoom.state.teams.set('C', lockedTeam);
       mockRoom.state.gold.set('C', 5);
@@ -223,7 +226,8 @@ describe('CardSystem', () => {
         writer: 'session_writer_b',
         writerPlayerId: 'player_writer_b',
         suggesters: [],
-        gold: 5
+        gold: 5,
+        deckSlots: []
       };
       mockRoom.state.teams.set('B', targetTeam);
       
@@ -231,6 +235,7 @@ describe('CardSystem', () => {
       
       // Check gold deducted
       expect(team.gold).toBe(2); // 5 - 3 = 2
+      expect(mockRoom.state.gold.get('A')).toBe(2);
       
       // Check effect created
       const effect = mockRoom.state.activeEffects.get('B');
@@ -247,6 +252,7 @@ describe('CardSystem', () => {
       cardSystem.setCostModifier('SHAKE', 0.5); // Half cost
       const targetTeam = {
         writer: 'session_writer_b',
+        deckSlots: []
         writerPlayerId: 'player_writer_b',
         suggesters: [],
         gold: 5
@@ -273,7 +279,8 @@ describe('CardSystem', () => {
         suggesters: [],
         gold: 5,
         answer: "",
-        locked: false
+        locked: false,
+        deckSlots: ['WRITER_SPOTLIGHT', null, null, null]
       };
       mockRoom.state.teams.set('C', cosmeticTeam);
       mockRoom.state.gold.set('C', 5);

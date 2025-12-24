@@ -7,7 +7,7 @@ import { CardSystem } from "./systems/cardSystem.js";
 import { ScoringSystem } from "./systems/scoringSystem.js";
 import { canPerformAction, isRoundFrozen } from "./systems/moderationGate.js";
 import { logDebug } from "./utils/log.js";
-import { CARDS } from "./config/cards.js";
+import { CARDS, CARD_CATALOG_V1_BY_ID } from "./config/cards.js";
 
 // Suggestion state schema
 class SuggestionState extends Schema {
@@ -309,10 +309,31 @@ export class QuizRoom extends Room {
             if (client.metadata.role !== "student") return;
 
             const team = this.findTeamByMember(client.sessionId);
-            if (!team || team.writer === client.sessionId) return; // Writers don't send suggestions
+            const teamId = team ? Array.from(this.state.teams.entries()).find(([_, t]) => t === team)?.[0] : null;
+            
+            // Card Catalog v1: Check if spectator suggestions are enabled
+            let isSpectator = false;
+            if (!team || team.writer === client.sessionId) {
+                // Check if this is a spectator (not in team but spectator mode enabled)
+                if (!team) {
+                    // Check all teams for spectator mode
+                    for (const [tId, t] of this.state.teams.entries()) {
+                        const spectatorMode = this.cardSystem.spectatorSuggestersEnabled.get(tId);
+                        if (spectatorMode && Date.now() < spectatorMode.expiresAt) {
+                            // This client can send suggestions to this team
+                            team = t;
+                            teamId = tId;
+                            isSpectator = true;
+                            break;
+                        }
+                    }
+                }
+                if (!team || (!isSpectator && team.writer === client.sessionId)) {
+                    return; // Writers don't send suggestions (unless spectator)
+                }
+            }
 
-            const teamId = Array.from(this.state.teams.entries()).find(([_, t]) => t === team)[0];
-            if (team.locked || this.state.roundState !== "ROUND_ACTIVE") return;
+            if (!teamId || team.locked || this.state.roundState !== "ROUND_ACTIVE") return;
 
             // Chapter 13: Use centralized moderation gate
             const canPerform = canPerformAction(this, {
@@ -324,10 +345,64 @@ export class QuizRoom extends Room {
                 return; // Silent failure
             }
 
+            // Card Catalog v1: Check for suggestion char limit
+            const charLimit = this.cardSystem.getSuggestionCharLimit(teamId);
+            if (charLimit && message.text.length > charLimit) {
+                console.log(`[QuizRoom] Suggestion rejected: exceeds char limit (${message.text.length} > ${charLimit})`);
+                client.send("ERROR", { message: `Suggestion too long. Maximum ${charLimit} characters allowed.` });
+                return;
+            }
+
+            // Card Catalog v1: Check for suggestion muting/delaying effects
+            const writerEffect = this.state.activeEffects.get(teamId);
+            if (writerEffect && writerEffect.effectType === "SUGGESTION_MUTE_RECEIVE") {
+                // Check if effect is still active
+                if (Date.now() < writerEffect.expiresAt) {
+                    const durationSeconds = writerEffect.effectParams.durationSeconds || 10;
+                    const elapsed = (Date.now() - writerEffect.timestamp) / 1000;
+                    if (elapsed < durationSeconds) {
+                        console.log(`[QuizRoom] Suggestion blocked by SUGGESTION_MUTE_RECEIVE for team ${teamId}`);
+                        return; // Block suggestion silently
+                    }
+                }
+            }
+
             const suggestion = new SuggestionState();
             suggestion.text = message.text;
             suggestion.suggesterId = client.sessionId;
             suggestion.timestamp = Date.now();
+
+            // Card Catalog v1: Check for suggestion delay
+            if (writerEffect && writerEffect.effectType === "SUGGESTION_DELAY") {
+                const delaySeconds = writerEffect.effectParams.delaySeconds || 2;
+                const delayMs = delaySeconds * 1000;
+                
+                // Store suggestion with delay
+                setTimeout(() => {
+                    // Check if writer still exists and round is still active
+                    const currentTeam = this.state.teams.get(teamId);
+                    if (!currentTeam || this.state.roundState !== "ROUND_ACTIVE") return;
+                    
+                    // Add suggestion after delay
+                    currentTeam.suggestions.push(suggestion);
+                    
+                    // Send to writer after delay
+                    const writerClient = this.clients.find(c => c.sessionId === currentTeam.writer);
+                    if (writerClient) {
+                        writerClient.send("SUGGESTION", {
+                            text: suggestion.text,
+                            suggesterId: suggestion.suggesterId,
+                            timestamp: suggestion.timestamp
+                        });
+                    }
+                    
+                    this.broadcastTeamUpdate();
+                    console.log(`[QuizRoom] Delayed suggestion delivered to team ${teamId} after ${delaySeconds} seconds`);
+                }, delayMs);
+                
+                console.log(`[QuizRoom] Suggestion delayed by ${delaySeconds} seconds for team ${teamId}`);
+                return; // Don't process immediately
+            }
 
             team.suggestions.push(suggestion);
 
@@ -338,6 +413,28 @@ export class QuizRoom extends Room {
 
             // Broadcast gold update
             this.broadcastGoldUpdate();
+
+            // Card Catalog v1: Check for priority channel mode
+            const priorityMode = this.cardSystem.suggestionPriorityMode.get(teamId);
+            if (priorityMode && Date.now() < priorityMode.expiresAt) {
+                // Only send top N suggesters' messages
+                // Group suggestions by suggester
+                const suggesterCounts = new Map();
+                for (const s of team.suggestions) {
+                    suggesterCounts.set(s.suggesterId, (suggesterCounts.get(s.suggesterId) || 0) + 1);
+                }
+                // Sort by count (descending) and take top N
+                const topSuggesters = Array.from(suggesterCounts.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, priorityMode.topCount)
+                    .map(([id]) => id);
+                
+                // Only send if this suggester is in top N
+                if (!topSuggesters.includes(suggestion.suggesterId)) {
+                    console.log(`[QuizRoom] Suggestion filtered by priority channel (not in top ${priorityMode.topCount})`);
+                    return; // Don't send to writer
+                }
+            }
 
             // Send suggestion to writer
             const writerClient = this.clients.find(c => c.sessionId === team.writer);
@@ -519,6 +616,77 @@ export class QuizRoom extends Room {
             this.cardSystem.handleCastCard(client, message);
         });
 
+        // Card Catalog v1: Client choice handlers
+        this.onMessage("WRITER_CHOICE_RESPONSE", (client, message) => {
+            if (client.metadata.isDisplay || client.metadata.role !== "student") return;
+            const { teamId, chosenSessionId } = message;
+            const team = this.state.teams.get(teamId);
+            if (!team || team.writer !== client.sessionId) {
+                client.send("ERROR", { message: "Only the current writer can choose" });
+                return;
+            }
+            // Execute swap with chosen sessionId
+            this.swapWriter(teamId, chosenSessionId, null, false, null);
+        });
+
+        this.onMessage("DECK_CARD_CHOICE_RESPONSE", (client, message) => {
+            if (client.metadata.isDisplay || client.metadata.role !== "student") return;
+            const { teamId, cardIndex } = message;
+            const team = this.state.teams.get(teamId);
+            if (!team || !team.deckSlots) return;
+            
+            const deckArray = Array.from(team.deckSlots);
+            if (cardIndex < 0 || cardIndex >= deckArray.length || deckArray[cardIndex] === null) {
+                client.send("ERROR", { message: "Invalid card selection" });
+                return;
+            }
+            
+            const chosenCard = deckArray[cardIndex];
+            deckArray.splice(cardIndex, 1);
+            deckArray.unshift(chosenCard);
+            
+            team.deckSlots.clear();
+            deckArray.forEach(card => team.deckSlots.push(card));
+            
+            this.broadcastTeamUpdate();
+            console.log(`[QuizRoom] Card ${chosenCard} moved to top of deck for team ${teamId}`);
+        });
+
+        this.onMessage("DECK_SLOT_SWAP_RESPONSE", (client, message) => {
+            if (client.metadata.isDisplay || client.metadata.role !== "student") return;
+            const { teamId, slotIndex1, slotIndex2 } = message;
+            const team = this.state.teams.get(teamId);
+            if (!team || !team.deckSlots) return;
+            
+            if (slotIndex1 < 0 || slotIndex1 >= 4 || slotIndex2 < 0 || slotIndex2 >= 4 || slotIndex1 === slotIndex2) {
+                client.send("ERROR", { message: "Invalid slot indices" });
+                return;
+            }
+            
+            const deckArray = Array.from(team.deckSlots);
+            [deckArray[slotIndex1], deckArray[slotIndex2]] = [deckArray[slotIndex2], deckArray[slotIndex1]];
+            
+            team.deckSlots.clear();
+            deckArray.forEach(card => team.deckSlots.push(card));
+            
+            this.broadcastTeamUpdate();
+            console.log(`[QuizRoom] Swapped deck slots ${slotIndex1} and ${slotIndex2} for team ${teamId}`);
+        });
+
+        this.onMessage("SUGGESTER_HIGHLIGHT_RESPONSE", (client, message) => {
+            if (client.metadata.isDisplay || client.metadata.role !== "student") return;
+            const { teamId, suggesterId, durationSeconds } = message;
+            const team = this.state.teams.get(teamId);
+            if (!team || team.writer !== client.sessionId) {
+                client.send("ERROR", { message: "Only the current writer can choose" });
+                return;
+            }
+            
+            const expiresAt = Date.now() + ((durationSeconds || 15) * 1000);
+            this.cardSystem.highlightedSuggesters.set(teamId, { suggesterId, expiresAt });
+            console.log(`[QuizRoom] Suggester ${suggesterId} highlighted for team ${teamId}`);
+        });
+
         // Chapter 16: Team deck editing
         this.onMessage("SET_TEAM_DECK_SLOT", async (client, message) => {
             if (client.metadata.isDisplay) {
@@ -555,16 +723,44 @@ export class QuizRoom extends Room {
 
             // If cardId is provided, validate it
             if (cardId !== null && cardId !== undefined && cardId !== "") {
-                // Card must exist in config
-                if (!CARDS[cardId]) {
+                // Card must exist in config (check both legacy CARDS and new catalog)
+                const cardExists = CARDS[cardId] || CARD_CATALOG_V1_BY_ID[cardId];
+                if (!cardExists) {
                     client.send("ERROR", { message: "Invalid card ID" });
                     return;
                 }
 
                 // Card must be in team's card pool
-                if (!team.teamCardPool.includes(cardId)) {
-                    client.send("ERROR", { message: "Card not available in team card pool" });
-                    return;
+                // Check both catalog ID and legacy ID (teamCardPool may contain either)
+                const isInPool = team.teamCardPool.includes(cardId);
+                let legacyId = null;
+                let catalogId = null;
+                if (!isInPool) {
+                    // Try converting catalog ID to legacy ID
+                    const { getLegacyIdFromCatalogId, getCatalogIdFromLegacyId } = await import("./config/cards.catalog.v1.js");
+                    legacyId = getLegacyIdFromCatalogId(cardId);
+                    catalogId = getCatalogIdFromLegacyId(cardId);
+                    
+                    // Check if pool has legacy version of this catalog card
+                    const hasLegacyVersion = legacyId && team.teamCardPool.includes(legacyId);
+                    // Check if pool has catalog version of this legacy card
+                    const hasCatalogVersion = catalogId && team.teamCardPool.includes(catalogId);
+                    
+                    if (!hasLegacyVersion && !hasCatalogVersion) {
+                        console.log(`[QuizRoom] Card ${cardId} not in pool. Pool:`, Array.from(team.teamCardPool));
+                        console.log(`[QuizRoom] Card validation - cardId: ${cardId}, legacyId: ${legacyId}, catalogId: ${catalogId}`);
+                        console.log(`[QuizRoom] Pool check - hasLegacy: ${hasLegacyVersion}, hasCatalog: ${hasCatalogVersion}`);
+                        client.send("ERROR", { message: "Card not available in team card pool" });
+                        return;
+                    }
+                    // If we found a match via conversion, use the matched ID for the rest of validation
+                    if (hasLegacyVersion) {
+                        // The pool has the legacy version, so we'll allow it
+                        console.log(`[QuizRoom] Card ${cardId} matched via legacy ID ${legacyId}`);
+                    } else if (hasCatalogVersion) {
+                        // The pool has the catalog version, so we'll allow it
+                        console.log(`[QuizRoom] Card ${cardId} matched via catalog ID ${catalogId}`);
+                    }
                 }
 
                 // Card must not be disabled for this match
@@ -676,6 +872,8 @@ export class QuizRoom extends Room {
                     team.deckLocked = true;
                 }
                 console.log("[QuizRoom] Match started - decks locked");
+                // Broadcast team update so clients know decks are locked
+                this.broadcastTeamUpdate();
             }
             
             // Set timer duration if provided (optional)
@@ -1548,18 +1746,98 @@ export class QuizRoom extends Room {
                 return; // Don't decrement timer when round is frozen - timer stays constant
             }
 
-            this.state.timeRemaining = Math.max(0, this.state.timeRemaining - 1);
+            // Card Catalog v1: Check for timer pause (per team - for now check all teams)
+            // Note: Timer is global, so we check if ANY team has pause active
+            let isPaused = false;
+            for (const [teamId] of this.state.teams.entries()) {
+                if (this.cardSystem.isTimerPaused(teamId)) {
+                    isPaused = true;
+                    break;
+                }
+            }
+            if (isPaused) {
+                return; // Don't decrement when paused
+            }
+
+            // Card Catalog v1: Check for timer start delay
+            let isDelayed = false;
+            for (const [teamId] of this.state.teams.entries()) {
+                if (this.cardSystem.isTimerStartDelayed(teamId)) {
+                    isDelayed = true;
+                    break;
+                }
+            }
+            if (isDelayed) {
+                return; // Don't start counting down until delay expires
+            }
+
+            // Card Catalog v1: Apply rate multipliers (check all teams, use highest multiplier)
+            let maxMultiplier = 1.0;
+            for (const [teamId] of this.state.teams.entries()) {
+                const multiplier = this.cardSystem.getTimerRateMultiplier(teamId);
+                if (multiplier > maxMultiplier) {
+                    maxMultiplier = multiplier;
+                }
+            }
+            
+            // Decrement by multiplier (e.g., 1.25x means subtract 1.25 seconds per tick)
+            const decrement = 1.0 * maxMultiplier;
+            this.state.timeRemaining = Math.max(0, this.state.timeRemaining - decrement);
 
             this.broadcast("TIMER_UPDATE", {
                 timeRemaining: this.state.timeRemaining,
                 enabled: this.state.timerEnabled
             });
 
+            // Card Catalog v1: Check for scheduled swaps
+            for (const [teamId, scheduled] of this.cardSystem.scheduledSwaps.entries()) {
+                if (Date.now() >= scheduled.swapAt) {
+                    // Execute scheduled swap
+                    const team = this.state.teams.get(teamId);
+                    if (team && team.suggesters.length > 0) {
+                        // Swap with random suggester
+                        const randomIndex = Math.floor(Math.random() * team.suggesters.length);
+                        const newWriter = team.suggesters[randomIndex];
+                        this.swapWriter(teamId, newWriter, null, false, null);
+                        this.cardSystem.scheduledSwaps.delete(teamId);
+                        console.log(`[QuizRoom] Scheduled swap executed for team ${teamId}`);
+                    }
+                }
+            }
+
             // Auto-end round when timer reaches 0 (only if timer is enabled)
             if (this.state.timeRemaining <= 0 && this.state.timerEnabled) {
-                // Transition to ROUND_REVIEW and end round
-                this.state.roundState = "ROUND_REVIEW";
-                this.endRound();
+                // Card Catalog v1: Check for overtime clause before ending
+                let overtimeApplied = false;
+                for (const [teamId, team] of this.state.teams.entries()) {
+                    const usedRounds = this.cardSystem.overtimeClauseUsed.get(teamId);
+                    const currentRound = this.scores.roundNumber;
+                    if (!usedRounds || !usedRounds.has(currentRound)) {
+                        // Find active overtime clause effect
+                        const activeEffect = this.state.activeEffects.get(teamId);
+                        if (activeEffect && activeEffect.effectType === "TIMER_OVERTIME_CLAUSE") {
+                            const safetySeconds = activeEffect.effectParams.safetySeconds || 5;
+                            this.state.timeRemaining = safetySeconds;
+                            if (!usedRounds) {
+                                this.cardSystem.overtimeClauseUsed.set(teamId, new Set());
+                            }
+                            this.cardSystem.overtimeClauseUsed.get(teamId).add(currentRound);
+                            overtimeApplied = true;
+                            this.broadcast("TIMER_UPDATE", {
+                                timeRemaining: this.state.timeRemaining,
+                                enabled: this.state.timerEnabled
+                            });
+                            console.log(`[QuizRoom] Overtime clause applied for team ${teamId}, timer set to ${safetySeconds} seconds`);
+                            break;
+                        }
+                    }
+                }
+                
+                if (!overtimeApplied) {
+                    // Transition to ROUND_REVIEW and end round
+                    this.state.roundState = "ROUND_REVIEW";
+                    this.endRound();
+                }
             }
         }, 1000);
     }
@@ -1590,6 +1868,20 @@ export class QuizRoom extends Room {
     }
 
     async endRound() {
+        // Card Catalog v1: Calculate and award gold interest before ending round
+        for (const [teamId, team] of this.state.teams.entries()) {
+            const interest = this.cardSystem.goldInterest.get(teamId);
+            if (interest) {
+                const unspentGold = team.gold;
+                const interestGain = Math.min(interest.maxGain, Math.floor(unspentGold / interest.rate));
+                if (interestGain > 0) {
+                    team.gold += interestGain;
+                    this.state.gold.set(teamId, team.gold);
+                    console.log(`[QuizRoom] Gold interest: +${interestGain} gold for team ${teamId} (unspent: ${unspentGold}, rate: ${interest.rate})`);
+                }
+            }
+        }
+        this.broadcastGoldUpdate();
         if (this.state.roundState !== "ROUND_ACTIVE" && this.state.roundState !== "ROUND_REVIEW") {
             // Already ended or not in correct state
             return;
@@ -1748,6 +2040,176 @@ export class QuizRoom extends Room {
         
         // Return sorted array for consistent rotation order
         return Array.from(memberIds).sort();
+    }
+
+    /**
+     * Swap writer for a team (called from card effects)
+     * @param {string} teamId - Team ID
+     * @param {string} mode - Swap mode: "swapWithRandomSuggester", "roulette"
+     * @param {number|null} durationSeconds - Duration in seconds, or null for rest of round
+     * @param {boolean} revert - Whether to revert after duration
+     * @param {EffectState} effect - The effect that triggered this swap
+     */
+    swapWriter(teamId, mode, durationSeconds, revert, effect) {
+        const team = this.state.teams.get(teamId);
+        if (!team) {
+            console.warn(`[QuizRoom] swapWriter: Team ${teamId} not found`);
+            return;
+        }
+        
+        // Card Catalog v1: Check for writer lock
+        if (this.cardSystem.isWriterLocked(teamId)) {
+            console.log(`[QuizRoom] swapWriter: Blocked by writer lock for team ${teamId}`);
+            return;
+        }
+
+        // Check for immunity
+        const immunityEffect = this.state.activeEffects.get(teamId);
+        if (immunityEffect && immunityEffect.effectType === "IMMUNITY") {
+            const blocksTypes = immunityEffect.effectParams.blocksEffectTypes || [];
+            if (blocksTypes.includes("WRITER_SWAP") || blocksTypes.includes("WRITER_ROULETTE") || blocksTypes.includes("WRITER_DOUBLE_SWAP")) {
+                console.log(`[QuizRoom] swapWriter blocked by IMMUNITY for team ${teamId}`);
+                return;
+            }
+        }
+
+        const oldWriter = team.writer;
+        const oldWriterPlayerId = team.writerPlayerId;
+        let newWriter = null;
+        let newWriterPlayerId = null;
+
+        // Handle mode as sessionId if it's a direct swap (from WRITER_CHOOSE)
+        if (mode && typeof mode === "string" && mode.length > 0 && mode !== "swapWithRandomSuggester" && mode !== "randomSuggester" && mode !== "roulette") {
+            // This is a direct sessionId swap
+            const newWriterSessionId = mode;
+            const newWriterClient = this.clients.find(c => c.sessionId === newWriterSessionId);
+            if (!newWriterClient) {
+                console.warn(`[QuizRoom] swapWriter: New writer sessionId ${newWriterSessionId} not found`);
+                return;
+            }
+            
+            team.writer = newWriterSessionId;
+            if (newWriterClient.metadata?.playerId) {
+                team.writerPlayerId = newWriterClient.metadata.playerId;
+            }
+            
+            // Remove new writer from suggesters
+            const newWriterIndex = team.suggesters.indexOf(newWriterSessionId);
+            if (newWriterIndex >= 0) {
+                team.suggesters.splice(newWriterIndex, 1);
+            }
+            
+            // Add old writer to suggesters
+            if (oldWriter && oldWriter !== newWriterSessionId) {
+                team.suggesters.push(oldWriter);
+            }
+            
+            this.broadcast("WRITER_ROTATED", {
+                teamId,
+                writer: team.writer,
+                writerPlayerId: team.writerPlayerId
+            });
+            this.updateTeamCardPool(teamId);
+            this.broadcastTeamUpdate();
+            console.log(`[QuizRoom] swapWriter: Direct swap for team ${teamId}, old: ${oldWriter}, new: ${newWriterSessionId}`);
+            return;
+        }
+
+        if (mode === "swapWithRandomSuggester" || mode === "randomSuggester") {
+            // Swap with random suggester
+            if (!team.suggesters || team.suggesters.length === 0) {
+                console.warn(`[QuizRoom] swapWriter: No suggesters available for team ${teamId}`);
+                return;
+            }
+            const randomIndex = Math.floor(Math.random() * team.suggesters.length);
+            newWriter = team.suggesters[randomIndex];
+            team.suggesters.splice(randomIndex, 1);
+            team.suggesters.push(oldWriter);
+        } else if (mode === "roulette") {
+            // Swap with random teammate (excluding current writer)
+            const allMembers = [];
+            if (team.writerPlayerId) {
+                const writerClient = this.clients.find(c => c.metadata?.playerId === team.writerPlayerId);
+                if (writerClient) allMembers.push({ sessionId: writerClient.sessionId, playerId: team.writerPlayerId });
+            }
+            team.suggesters.forEach(sessionId => {
+                const suggesterClient = this.clients.find(c => c.sessionId === sessionId);
+                if (suggesterClient && suggesterClient.metadata?.playerId) {
+                    allMembers.push({ sessionId, playerId: suggesterClient.metadata.playerId });
+                }
+            });
+            
+            // Exclude current writer
+            const availableMembers = allMembers.filter(m => m.sessionId !== oldWriter);
+            if (availableMembers.length === 0) {
+                console.warn(`[QuizRoom] swapWriter: No available teammates for roulette swap`);
+                return;
+            }
+            
+            const randomMember = availableMembers[Math.floor(Math.random() * availableMembers.length)];
+            newWriter = randomMember.sessionId;
+            newWriterPlayerId = randomMember.playerId;
+            
+            // Update suggesters array
+            const oldWriterIndex = team.suggesters.indexOf(oldWriter);
+            if (oldWriterIndex >= 0) {
+                team.suggesters.splice(oldWriterIndex, 1);
+            }
+            team.suggesters.push(oldWriter);
+        } else {
+            console.warn(`[QuizRoom] swapWriter: Unknown mode ${mode}`);
+            return;
+        }
+
+        // Update writer
+        team.writer = newWriter;
+        if (newWriterPlayerId) {
+            team.writerPlayerId = newWriterPlayerId;
+        } else {
+            // Try to find playerId from client
+            const newWriterClient = this.clients.find(c => c.sessionId === newWriter);
+            if (newWriterClient && newWriterClient.metadata?.playerId) {
+                team.writerPlayerId = newWriterClient.metadata.playerId;
+            }
+        }
+
+        // Broadcast writer swap
+        this.broadcast("WRITER_ROTATED", {
+            teamId,
+            writer: team.writer,
+            writerPlayerId: team.writerPlayerId
+        });
+
+        // Update team card pool
+        this.updateTeamCardPool(teamId);
+        this.broadcastTeamUpdate();
+
+        console.log(`[QuizRoom] swapWriter: Swapped writer for team ${teamId}, old: ${oldWriter}, new: ${newWriter}, mode: ${mode}`);
+
+        // Handle revert if needed
+        if (revert && durationSeconds) {
+            setTimeout(() => {
+                // Revert swap
+                team.writer = oldWriter;
+                team.writerPlayerId = oldWriterPlayerId;
+                
+                // Update suggesters
+                const newWriterIndex = team.suggesters.indexOf(newWriter);
+                if (newWriterIndex >= 0) {
+                    team.suggesters.splice(newWriterIndex, 1);
+                }
+                team.suggesters.push(newWriter);
+                
+                this.broadcast("WRITER_ROTATED", {
+                    teamId,
+                    writer: team.writer,
+                    writerPlayerId: team.writerPlayerId
+                });
+                this.updateTeamCardPool(teamId);
+                this.broadcastTeamUpdate();
+                console.log(`[QuizRoom] swapWriter: Reverted swap for team ${teamId}`);
+            }, durationSeconds * 1000);
+        }
     }
 
     rotateWriters() {
@@ -1914,12 +2376,29 @@ export class QuizRoom extends Room {
 
         // Union all unlocked cards
         const cardPoolSet = new Set();
+        const { getLegacyIdFromCatalogId, getCatalogIdFromLegacyId } = await import("./config/cards.catalog.v1.js");
+        
         for (const playerId of playerIds) {
             const unlockedCards = getPlayerUnlockedCards(playerId);
             for (const cardId of unlockedCards) {
-                // Filter against authoritative card config
-                if (CARDS[cardId]) {
+                // Filter against authoritative card config (check both legacy and catalog)
+                if (CARDS[cardId] || CARD_CATALOG_V1_BY_ID[cardId]) {
                     cardPoolSet.add(cardId);
+                    
+                    // Also add the corresponding catalog/legacy version for compatibility
+                    if (CARDS[cardId]) {
+                        // This is a legacy ID, also add catalog version if it exists
+                        const catalogVersion = getCatalogIdFromLegacyId(cardId);
+                        if (catalogVersion && CARD_CATALOG_V1_BY_ID[catalogVersion]) {
+                            cardPoolSet.add(catalogVersion);
+                        }
+                    } else if (CARD_CATALOG_V1_BY_ID[cardId]) {
+                        // This is a catalog ID, also add legacy version if it exists
+                        const legacyVersion = getLegacyIdFromCatalogId(cardId);
+                        if (legacyVersion && CARDS[legacyVersion]) {
+                            cardPoolSet.add(legacyVersion);
+                        }
+                    }
                 }
             }
         }

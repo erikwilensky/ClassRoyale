@@ -43,7 +43,7 @@ export function StudentClashLayout({
         )}
       </main>
 
-      {hasTeam && <BottomHand {...handProps} />}
+      {hasTeam && handProps && <BottomHand {...handProps} />}
     </div>
   );
 }

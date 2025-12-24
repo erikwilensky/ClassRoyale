@@ -4,44 +4,57 @@ import request from 'supertest';
 import { MockRoom } from '../helpers/mockRoom.js';
 import { CardSystem } from '../../server/systems/cardSystem.js';
 
-// Mock auth service - must be hoisted before import
+// Mock the entire middleware module FIRST to bypass authentication
+// This must be before any imports that use it
+jest.mock('../../server/middleware/auth.js', () => {
+  return {
+    authenticateToken: jest.fn((req, res, next) => {
+      // Directly set the required properties - bypass token verification
+      req.playerId = 'test-teacher';
+      req.isTeacher = true;
+      next();
+    })
+  };
+}, { virtual: true });
+
+// Mock auth service as well (in case it's used elsewhere)
 jest.mock('../../server/auth/auth.js', () => ({
-  verifyToken: (token) => {
-    // Return a valid decoded token for any token
-    return {
-      playerId: 'test-teacher',
-      isTeacher: true
-    };
-  }
+  verifyToken: jest.fn((token) => {
+    if (token) {
+      return {
+        playerId: 'test-teacher',
+        isTeacher: true
+      };
+    }
+    return null;
+  })
 }), { virtual: true });
 
-// Mock authentication middleware - must be hoisted before import
-jest.mock('../../server/middleware/auth.js', () => ({
-  authenticateToken: (req, res, next) => {
-    req.isTeacher = true;
-    req.playerId = 'test-teacher';
-    next();
-  }
-}), { virtual: true });
-
-// Import routes after mock
+// Import routes after mocks
 import matchCardRulesRoutes, { setMatchCardRulesInstance } from '../../server/routes/matchCardRules.js';
 
 // Mock card config
 jest.mock('../../server/config/cards.js', () => ({
-  getAllCards: () => [
+  CARDS: {
+    SHAKE: { id: 'SHAKE', name: 'Shake', type: 'standard', cost: 3 },
+    BLUR: { id: 'BLUR', name: 'Blur', type: 'standard', cost: 2 },
+    WRITER_SPOTLIGHT: { id: 'WRITER_SPOTLIGHT', name: 'Writer Spotlight', type: 'cosmetic', cost: 0 }
+  },
+  getAllCards: jest.fn(() => [
     { id: 'SHAKE', name: 'Shake', type: 'standard', cost: 3 },
     { id: 'BLUR', name: 'Blur', type: 'standard', cost: 2 },
     { id: 'WRITER_SPOTLIGHT', name: 'Writer Spotlight', type: 'cosmetic', cost: 0 }
-  ],
-  getCardById: (id) => {
+  ]),
+  getCardById: jest.fn((id) => {
     const cards = {
       SHAKE: { id: 'SHAKE', name: 'Shake', type: 'standard', cost: 3 },
       BLUR: { id: 'BLUR', name: 'Blur', type: 'standard', cost: 2 },
       WRITER_SPOTLIGHT: { id: 'WRITER_SPOTLIGHT', name: 'Writer Spotlight', type: 'cosmetic', cost: 0 }
     };
-    return cards[id];
-  }
+    return cards[id] || null;
+  }),
+  CARD_CATALOG_V1: [],
+  CARD_CATALOG_V1_BY_ID: {}
 }), { virtual: true });
 
 describe('Match Card Rules Routes', () => {
@@ -50,8 +63,20 @@ describe('Match Card Rules Routes', () => {
   let cardSystem;
 
   beforeEach(() => {
+    // Reset mocks
+    jest.clearAllMocks();
+    
     app = express();
     app.use(express.json());
+    
+    // Add a middleware to bypass authentication for tests
+    app.use('/api/match', (req, res, next) => {
+      req.playerId = 'test-teacher';
+      req.isTeacher = true;
+      next();
+    });
+    
+    // Then add the actual routes
     app.use('/api/match', matchCardRulesRoutes);
     
     mockRoom = new MockRoom();
